@@ -614,6 +614,16 @@ class MeanAudio(nn.Module):
         if 'text_rot' in src_dict:
             del src_dict['text_rot']
 
+        fallback_mapping = {
+            "r_embed.mlp.0.weight": "t_embed.mlp.0.weight",
+            "r_embed.mlp.0.bias": "t_embed.mlp.0.bias",
+            "r_embed.mlp.2.weight": "t_embed.mlp.2.weight",
+            "r_embed.mlp.2.bias": "t_embed.mlp.2.bias",
+        }
+        for target_key, source_key in fallback_mapping.items():
+            if target_key not in src_dict and source_key in src_dict:
+                src_dict[target_key] = src_dict[source_key].clone()
+
         if 'empty_string_feat_c' not in src_dict.keys():  # FIXME: issue of version mismatch here
             src_dict['empty_string_feat_c'] = src_dict['empty_string_feat'].mean(dim=0)
         if '_extra_state' in src_dict:
