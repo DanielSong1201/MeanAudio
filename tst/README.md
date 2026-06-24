@@ -83,3 +83,31 @@ Default feature layers:
 - `fused_7`
 
 The script checks that each extracted feature has shape `B x 312 x 448`, that teacher parameters remain gradient-free, and that the input latent receives gradients through the frozen teacher feature path.
+
+## Phase 2
+
+Phase 2 adds a standalone teacher-feature drifting loss implementation:
+
+```text
+meanaudio/model/teacher_feature_drifting.py
+```
+
+Run the synthetic gradient check:
+
+```bash
+bash tst/phase2_00_check_tfd_loss.sh
+```
+
+On a CUDA server, you can also run:
+
+```bash
+DEVICE=cuda DTYPE=bfloat16 bash tst/phase2_00_check_tfd_loss.sh
+```
+
+If the active shell does not expose `python`, specify the interpreter:
+
+```bash
+PYTHON_BIN=/path/to/conda/env/bin/python bash tst/phase2_00_check_tfd_loss.sh
+```
+
+This check does not load the FluxAudio teacher. It verifies the drifting loss and anchor-margin coverage loss on synthetic feature dictionaries with the same layer names used by Phase 1.

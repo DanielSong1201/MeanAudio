@@ -11,6 +11,7 @@ CKPT_PATH="${BASELINE_WEIGHTS:-${WEIGHTS_DIR}/meanaudio_s_full.pth}"
 OUTPUT_PATH="${OUTPUT_PATH:-./exps/phase0_meanaudio_s_full/test_${NUM_STEPS}nfe_fp32}"
 GT_CACHE="${GT_CACHE:-./data/audiocaps/test-features}"
 CFG_STRENGTH="${CFG_STRENGTH:-0.9}"
+mkdir -p "$OUTPUT_PATH"
 
 python eval.py \
   --variant "meanaudio_s" \
@@ -32,5 +33,4 @@ python av-benchmark/evaluate.py \
   --pred_cache "$OUTPUT_PATH/cache" \
   --audio_length=10 \
   --recompute_pred_cache \
-  --skip_video_related \
-  --output_metrics_dir="$OUTPUT_PATH"
+  --skip_video_related 2>&1 | tee "$OUTPUT_PATH/evaluate.log"
