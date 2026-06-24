@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
-import math
 import random
 import sys
 from pathlib import Path
@@ -16,10 +15,9 @@ import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from meanaudio.model.mean_flow import MeanFlow
+from drifting.eval_helpers import empty_cuda_cache, move_optimizer_state, run_checkpoint_evaluation
 from meanaudio.model.networks import get_mean_audio
 from meanaudio.model.teacher_feature_drifting import TeacherFeatureDriftingLoss
-from drifting.eval_helpers import empty_cuda_cache, move_optimizer_state, run_checkpoint_evaluation
 
 
 def load_torch(path: Path, map_location: str | torch.device):
@@ -38,9 +36,8 @@ class AudioCapsNpzDataset(Dataset):
             raise ValueError(f"No rows found in {tsv_path}")
         if not npz_dir.exists():
             raise FileNotFoundError(f"Missing npz directory: {npz_dir}")
-        first_npz = npz_dir / "0.npz"
-        if not first_npz.exists():
-            raise FileNotFoundError(f"Missing sample npz: {first_npz}")
+        if not (npz_dir / "0.npz").exists():
+            raise FileNotFoundError(f"Missing sample npz: {npz_dir / '0.npz'}")
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -59,11 +56,11 @@ class AudioCapsNpzDataset(Dataset):
 
 def setup_logger(output_dir: Path) -> logging.Logger:
     output_dir.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("drifting")
+    logger = logging.getLogger("drifting.flux")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
-
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
     file_handler = logging.FileHandler(output_dir / "train.log")
@@ -91,7 +88,14 @@ def load_data_config(path: Path, split: str) -> dict[str, Any]:
     return data_cfg
 
 
-def maybe_load_empty_features(weights_dir: Path, text_seq_len: int, text_dim: int, text_c_dim: int, logger: logging.Logger):
+def maybe_load_empty_features(
+    weights_dir: Path,
+    *,
+    text_seq_len: int,
+    text_dim: int,
+    text_c_dim: int,
+    logger: logging.Logger,
+):
     text_path = weights_dir / "empty_string_t5.pth"
     text_c_path = weights_dir / "empty_string_clap_c.pth"
     if text_path.exists() and text_c_path.exists():
@@ -99,7 +103,6 @@ def maybe_load_empty_features(weights_dir: Path, text_seq_len: int, text_dim: in
         empty_text_c = load_torch(text_c_path, "cpu")[0]
         logger.info("Loaded empty string features from %s", weights_dir)
         return empty_text, empty_text_c
-
     logger.warning("Empty string feature files not found in %s; using zeros.", weights_dir)
     return torch.zeros(text_seq_len, text_dim), torch.zeros(text_c_dim)
 
@@ -124,10 +127,86 @@ def parse_radii(text: str) -> tuple[float, ...]:
     return radii
 
 
+def build_flux_model(
+    *,
+    weights_path: Path,
+    device: torch.device,
+    latent_mean: torch.Tensor,
+    latent_std: torch.Tensor,
+    empty_text: torch.Tensor,
+    empty_text_c: torch.Tensor,
+    use_rope: bool,
+):
+    model = get_mean_audio(
+        "fluxaudio_s",
+        latent_mean=latent_mean,
+        latent_std=latent_std,
+        empty_string_feat=empty_text,
+        empty_string_feat_c=empty_text_c,
+        use_rope=use_rope,
+        text_c_dim=512,
+    ).to(device)
+    model.load_weights(load_torch(weights_path, device))
+    return model
+
+
+def one_step_flux_loss(
+    *,
+    student,
+    teacher,
+    criterion: TeacherFeatureDriftingLoss,
+    text_f: torch.Tensor,
+    text_f_c: torch.Tensor,
+    a_mean: torch.Tensor,
+    a_std: torch.Tensor,
+    feature_layers: tuple[str, ...],
+    feature_noise: float,
+    lambda_flow: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    x_real = a_mean + a_std * torch.randn_like(a_mean)
+    x_real = student.normalize(x_real)
+    x_noise = torch.randn_like(x_real)
+
+    t_one = torch.ones(x_real.shape[0], device=x_real.device, dtype=x_real.dtype)
+    student_conditions = student.preprocess_conditions(text_f, text_f_c)
+    pred_flow = student.predict_flow(x_noise, t_one, student_conditions)
+    target_flow = x_noise - x_real
+    flow_loss = (pred_flow - target_flow).pow(2).mean()
+    x_student = x_noise - pred_flow
+
+    sigma = torch.full((x_real.shape[0], 1, 1), feature_noise, device=x_real.device, dtype=x_real.dtype)
+    x_real_feat = (1.0 - sigma) * x_real.detach() + sigma * torch.randn_like(x_real)
+    x_student_feat = (1.0 - sigma) * x_student + sigma * torch.randn_like(x_student)
+    feature_t = torch.full((x_real.shape[0],), feature_noise, device=x_real.device, dtype=x_real.dtype)
+
+    teacher_conditions = teacher.preprocess_conditions(text_f, text_f_c)
+    with torch.no_grad():
+        positive_features = teacher.extract_features(
+            x_real_feat,
+            feature_t,
+            teacher_conditions,
+            layers=feature_layers,
+        )
+    generated_features = teacher.extract_features(
+        x_student_feat,
+        feature_t,
+        teacher_conditions,
+        layers=feature_layers,
+    )
+    tfd_output = criterion(generated_features, positive_features)
+    total_loss = lambda_flow * flow_loss + tfd_output.loss
+    return total_loss, {
+        "flow_loss": flow_loss.detach(),
+        "tfd_loss": tfd_output.loss.detach(),
+        "drifting_loss": tfd_output.drifting_loss,
+        "anchor_loss": tfd_output.anchor_loss,
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a one-step MeanAudio student with FluxAudio teacher-feature drifting.")
-    parser.add_argument("--exp-id", default="drifting_fluxaudio_s")
-    parser.add_argument("--output-root", type=Path, default=Path("exps/drifting"))
+    parser = argparse.ArgumentParser(description="Train pure FluxAudio one-step student with FluxAudio teacher-feature drifting.")
+    parser.add_argument("--exp-id", default="flux_drifting_s_1x4090")
+    parser.add_argument("--output-root", type=Path, default=Path("exps/drifting_flux"))
     parser.add_argument("--data-config", type=Path, default=Path("config/data/t5_clap.yaml"))
     parser.add_argument("--train-split", default="AudioCaps_npz")
     parser.add_argument("--weights-dir", type=Path, default=Path("weights"))
@@ -135,8 +214,6 @@ def main() -> None:
     parser.add_argument("--student-init", type=Path, default=Path("weights/fluxaudio_s_full.pth"))
     parser.add_argument("--latent-mean", type=Path, default=Path("sets/latent_mean.pt"))
     parser.add_argument("--latent-std", type=Path, default=Path("sets/latent_std.pt"))
-    parser.add_argument("--model", default="meanaudio_s")
-    parser.add_argument("--teacher-model", default="fluxaudio_s")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=1000)
@@ -150,17 +227,17 @@ def main() -> None:
     parser.add_argument("--feature-noise", type=float, default=0.1)
     parser.add_argument("--pool-tokens", type=int, default=64)
     parser.add_argument("--radii", default="0.02,0.05,0.1,0.2")
-    parser.add_argument("--lambda-mf", type=float, default=1.0)
+    parser.add_argument("--lambda-flow", type=float, default=1.0)
     parser.add_argument("--lambda-tfd", type=float, default=0.2)
     parser.add_argument("--lambda-anchor", type=float, default=0.05)
     parser.add_argument("--anchor-margin-alpha", type=float, default=0.5)
     parser.add_argument("--log-interval", type=int, default=20)
     parser.add_argument("--save-interval", type=int, default=1000)
     parser.add_argument("--eval-interval", type=int, default=10000, help="Run full evaluation every N iterations; set 0 to disable.")
-    parser.add_argument("--eval-output-root", type=Path, default=Path("exps/drifting_eval"))
+    parser.add_argument("--eval-output-root", type=Path, default=Path("exps/drifting_flux_eval"))
     parser.add_argument("--eval-gt-cache", type=Path, default=Path("data/audiocaps/test-features"))
     parser.add_argument("--eval-num-steps", type=int, default=1)
-    parser.add_argument("--eval-cfg-strength", type=float, default=0.9)
+    parser.add_argument("--eval-cfg-strength", type=float, default=4.5)
     parser.add_argument("--no-eval-offload-train-state", dest="eval_offload_train_state", action="store_false")
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
     parser.set_defaults(eval_offload_train_state=True)
@@ -210,35 +287,31 @@ def main() -> None:
         logger=logger,
     )
 
-    student = get_mean_audio(
-        args.model,
+    logger.info("Loading FluxAudio student init: %s", args.student_init)
+    student = build_flux_model(
+        weights_path=args.student_init,
+        device=device,
         latent_mean=latent_mean,
         latent_std=latent_std,
-        empty_string_feat=empty_text,
-        empty_string_feat_c=empty_text_c,
+        empty_text=empty_text,
+        empty_text_c=empty_text_c,
         use_rope=args.use_rope,
-        text_c_dim=512,
-    ).to(device)
-    teacher = get_mean_audio(
-        args.teacher_model,
+    )
+    logger.info("Loading frozen FluxAudio teacher: %s", args.teacher_weights)
+    teacher = build_flux_model(
+        weights_path=args.teacher_weights,
+        device=device,
         latent_mean=latent_mean,
         latent_std=latent_std,
-        empty_string_feat=empty_text,
-        empty_string_feat_c=empty_text_c,
+        empty_text=empty_text,
+        empty_text_c=empty_text_c,
         use_rope=args.use_rope,
-        text_c_dim=512,
-    ).to(device)
-
-    logger.info("Loading student init: %s", args.student_init)
-    student.load_weights(load_torch(args.student_init, device))
-    logger.info("Loading teacher weights: %s", args.teacher_weights)
-    teacher.load_weights(load_torch(args.teacher_weights, device))
+    )
     freeze_module(teacher)
     student.train()
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    meanflow = MeanFlow()
-    tfd_loss = TeacherFeatureDriftingLoss(
+    criterion = TeacherFeatureDriftingLoss(
         radii=parse_radii(args.radii),
         pool_tokens=args.pool_tokens,
         anchor_margin_alpha=args.anchor_margin_alpha,
@@ -250,7 +323,7 @@ def main() -> None:
     autocast_dtype = torch.bfloat16 if use_amp else torch.float32
 
     data_iter = iter(loader)
-    for iteration in tqdm(range(1, args.iterations + 1), desc="drifting-train"):
+    for iteration in tqdm(range(1, args.iterations + 1), desc="flux-drifting-train"):
         try:
             batch = next(data_iter)
         except StopIteration:
@@ -263,49 +336,18 @@ def main() -> None:
         a_std = batch["a_std"].to(device=device, non_blocking=True)
 
         with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=use_amp):
-            x_real = a_mean + a_std * torch.randn_like(a_mean)
-            x_real = student.normalize(x_real)
-
-            mf_loss_vec, _, _ = meanflow.loss(
-                student,
-                x_real,
-                text_f.clone(),
-                text_f_c.clone(),
-                text_f,
-                text_f_c,
-                student.empty_string_feat,
-                student.empty_string_feat_c,
+            total_loss, loss_parts = one_step_flux_loss(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                text_f=text_f,
+                text_f_c=text_f_c,
+                a_mean=a_mean,
+                a_std=a_std,
+                feature_layers=feature_layers,
+                feature_noise=args.feature_noise,
+                lambda_flow=args.lambda_flow,
             )
-            mf_loss = mf_loss_vec.mean()
-
-            conditions_student = student.preprocess_conditions(text_f, text_f_c)
-            x_noise = torch.randn_like(x_real)
-            ones = torch.ones(x_real.shape[0], device=device, dtype=x_real.dtype)
-            zeros = torch.zeros_like(ones)
-            student_flow = student.predict_flow(x_noise, ones, zeros, conditions_student)
-            x_student = x_noise - student_flow
-
-            sigma = torch.full((x_real.shape[0], 1, 1), args.feature_noise, device=device, dtype=x_real.dtype)
-            x_real_feat = (1.0 - sigma) * x_real.detach() + sigma * torch.randn_like(x_real)
-            x_student_feat = (1.0 - sigma) * x_student + sigma * torch.randn_like(x_student)
-
-            teacher_conditions = teacher.preprocess_conditions(text_f, text_f_c)
-            feature_t = torch.full((x_real.shape[0],), args.feature_noise, device=device, dtype=x_real.dtype)
-            with torch.no_grad():
-                positive_features = teacher.extract_features(
-                    x_real_feat,
-                    feature_t,
-                    teacher_conditions,
-                    layers=feature_layers,
-                )
-            generated_features = teacher.extract_features(
-                x_student_feat,
-                feature_t,
-                teacher_conditions,
-                layers=feature_layers,
-            )
-            tfd_output = tfd_loss(generated_features, positive_features)
-            total_loss = args.lambda_mf * mf_loss + tfd_output.loss
 
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
@@ -316,19 +358,19 @@ def main() -> None:
             row = {
                 "iteration": iteration,
                 "total_loss": float(total_loss.detach().float().item()),
-                "meanflow_loss": float(mf_loss.detach().float().item()),
-                "tfd_loss": float(tfd_output.loss.detach().float().item()),
-                "drifting_loss": float(tfd_output.drifting_loss.float().item()),
-                "anchor_loss": float(tfd_output.anchor_loss.float().item()),
+                "flow_loss": float(loss_parts["flow_loss"].float().item()),
+                "tfd_loss": float(loss_parts["tfd_loss"].float().item()),
+                "drifting_loss": float(loss_parts["drifting_loss"].float().item()),
+                "anchor_loss": float(loss_parts["anchor_loss"].float().item()),
                 "grad_norm": float(grad_norm.detach().float().item()),
                 "lr": optimizer.param_groups[0]["lr"],
             }
             append_metrics(metrics_path, row)
             logger.info(
-                "it=%d total=%.6f mf=%.6f tfd=%.6f drift=%.6f anchor=%.6f grad=%.4f",
+                "it=%d total=%.6f flow=%.6f tfd=%.6f drift=%.6f anchor=%.6f grad=%.4f",
                 iteration,
                 row["total_loss"],
-                row["meanflow_loss"],
+                row["flow_loss"],
                 row["tfd_loss"],
                 row["drifting_loss"],
                 row["anchor_loss"],
@@ -353,7 +395,7 @@ def main() -> None:
                 empty_cuda_cache()
             try:
                 run_checkpoint_evaluation(
-                    eval_entrypoint=Path("drifting/test.py"),
+                    eval_entrypoint=Path("drifting/flux/test.py"),
                     iteration=iteration,
                     checkpoint_path=eval_weight_path,
                     output_root=args.eval_output_root,
@@ -378,7 +420,7 @@ def main() -> None:
     last_path = output_dir / f"{args.exp_id}_last.pth"
     torch.save(student.state_dict(), last_path)
     logger.info("Saved final weights to %s", last_path)
-    logger.info("Training completed.")
+    logger.info("FluxAudio drifting training completed.")
 
 
 if __name__ == "__main__":

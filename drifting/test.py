@@ -88,9 +88,10 @@ def run_eval(args: argparse.Namespace) -> None:
         "512",
         "--num_steps",
         str(args.num_steps),
-        "--use_meanflow",
-        "--full_precision",
     ]
+    if args.use_rope:
+        eval_cmd.append("--use_rope")
+    eval_cmd.extend(["--use_meanflow", "--full_precision"])
     subprocess.run(eval_cmd, check=True)
 
     bench_cmd = [
