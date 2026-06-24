@@ -223,6 +223,58 @@ class FluxAudio(nn.Module):
         flow = self.final_layer(latent, extended_c)  # (B, N, out_dim), remove t
         return flow
 
+    def extract_features(self,
+                         latent: torch.Tensor,
+                         t: torch.Tensor,
+                         conditions: PreprocessedConditions,
+                         layers: tuple[str, ...] = ("joint_3", "fused_3", "fused_7")
+                         ) -> dict[str, torch.Tensor]:
+        """
+        Return intermediate latent-token features from the FluxAudio teacher.
+
+        The forward path intentionally mirrors predict_flow(), but stores selected
+        hidden states for teacher-feature drifting. Freezing teacher parameters is
+        the caller's responsibility; do not wrap this method in no_grad when the
+        generated latent needs gradients through the frozen teacher feature space.
+        """
+        assert latent.shape[1] == self._latent_seq_len, f'{latent.shape=} {self._latent_seq_len=}'
+
+        requested_layers = set(layers)
+        valid_layers = {"audio_proj"}
+        valid_layers.update(f"joint_{i}" for i in range(len(self.joint_blocks)))
+        valid_layers.update(f"fused_{i}" for i in range(len(self.fused_blocks)))
+        invalid_layers = requested_layers - valid_layers
+        if invalid_layers:
+            raise ValueError(
+                f"Unknown FluxAudio feature layers: {sorted(invalid_layers)}. "
+                f"Valid layers are: {sorted(valid_layers)}"
+            )
+
+        features: dict[str, torch.Tensor] = {}
+        text_f = conditions.text_f
+        text_f_c = conditions.text_f_c
+
+        latent = self.audio_input_proj(latent)  # (B, N, D)
+        if "audio_proj" in requested_layers:
+            features["audio_proj"] = latent
+
+        global_c = self.t_embed(t).unsqueeze(1) + text_f_c.unsqueeze(1)  # (B, 1, D)
+        extended_c = global_c
+
+        for i, block in enumerate(self.joint_blocks):
+            latent, text_f = block(latent, text_f, global_c, extended_c, self.latent_rot, self.text_rot)
+            layer_name = f"joint_{i}"
+            if layer_name in requested_layers:
+                features[layer_name] = latent
+
+        for i, block in enumerate(self.fused_blocks):
+            latent = block(latent, extended_c, self.latent_rot)
+            layer_name = f"fused_{i}"
+            if layer_name in requested_layers:
+                features[layer_name] = latent
+
+        return features
+
     def forward(self, latent: torch.Tensor, text_f: torch.Tensor, text_f_c: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
         latent: (B, N, C) 
@@ -639,4 +691,3 @@ if __name__ == '__main__':
     x = torch.randn(256, 312, 20)
     print(x.shape)
     print('Finish')
-

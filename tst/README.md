@@ -67,3 +67,19 @@ The evaluation scripts write outputs under:
 - `exps/phase0_meanaudio_s_full/`
 
 They reuse the repository's `eval.py` and `av-benchmark/evaluate.py` paths, so install `av-benchmark` on the 4090 server before running the evaluation steps.
+
+## Phase 1
+
+After Phase 0 succeeds, validate that the frozen `FluxAudio-S-Full` teacher can expose intermediate hidden states while still allowing gradients to flow back to the generated latent:
+
+```bash
+bash tst/phase1_00_check_teacher_features.sh
+```
+
+Default feature layers:
+
+- `joint_3`
+- `fused_3`
+- `fused_7`
+
+The script checks that each extracted feature has shape `B x 312 x 448`, that teacher parameters remain gradient-free, and that the input latent receives gradients through the frozen teacher feature path.
