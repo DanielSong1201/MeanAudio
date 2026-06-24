@@ -6,15 +6,38 @@ The layout follows the rest of this repository:
 
 ```text
 drifting/
-  train.py                         # training entrypoint
-  test.py                          # testing/evaluation entrypoint
+  train.py                         # compatibility entrypoint for MeanAudio-student training
+  test.py                          # compatibility entrypoint for MeanAudio-student testing/eval
+  mean/                            # MeanAudio-S one-step student route
+  flux/                            # FluxAudio-S one-step student route
   scripts/
     train_drifting_1x4090.sh
     test_drifting.sh
     eval_drifting_checkpoint.sh
+    mean/
+      train_mean_1x4090.sh
+      test_mean.sh
+      eval_mean_checkpoint.sh
+    flux/
+      train_flux_1x4090.sh
+      test_flux.sh
 ```
 
 ## Training
+
+Original MeanAudio-student route:
+
+```bash
+bash drifting/scripts/mean/train_mean_1x4090.sh
+```
+
+Pure FluxAudio-student route:
+
+```bash
+bash drifting/scripts/flux/train_flux_1x4090.sh
+```
+
+Compatibility entrypoint for the original MeanAudio-student route:
 
 Run from the repository root:
 
