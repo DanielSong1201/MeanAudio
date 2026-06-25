@@ -101,6 +101,9 @@ From the repository root:
 bash drifting/scripts/flux/train_flux_1x4090.sh
 ```
 
+The default training length is `1000000` iterations. Override it with
+`ITERATIONS=<steps>`.
+
 Common overrides:
 
 ```bash

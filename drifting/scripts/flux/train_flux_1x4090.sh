@@ -11,7 +11,7 @@ python drifting/flux/train.py \
   --student-init "${STUDENT_INIT:-weights/fluxaudio_s_full.pth}" \
   --batch-size "${BATCH_SIZE:-4}" \
   --num-workers "${NUM_WORKERS:-4}" \
-  --iterations "${ITERATIONS:-1000}" \
+  --iterations "${ITERATIONS:-1000000}" \
   --learning-rate "${LEARNING_RATE:-5e-5}" \
   --log-interval "${LOG_INTERVAL:-20}" \
   --save-interval "${SAVE_INTERVAL:-1000}" \

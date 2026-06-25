@@ -45,6 +45,9 @@ Run from the repository root:
 bash drifting/scripts/train_drifting_1x4090.sh
 ```
 
+The default training length is `1000000` iterations. Override it with
+`ITERATIONS=<steps>`.
+
 The training entrypoint writes logs and metrics to:
 
 ```text
@@ -60,7 +63,12 @@ weights are saved as:
 
 ```text
 exps/drifting/<exp_id>/<exp_id>_last.pth
+exps/drifting/<exp_id>/<exp_id>_ema_last.pth
 ```
+
+For the MeanAudio-student route, EMA is enabled by default and training-time
+eval uses EMA weights unless `--eval-raw` is passed to `drifting/train.py`.
+The raw checkpoint is still saved for comparison.
 
 By default, training runs a full evaluation every 10000 iterations using the
 same method as `drifting/scripts/eval_drifting_checkpoint.sh`: it calls

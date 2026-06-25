@@ -216,7 +216,7 @@ def main() -> None:
     parser.add_argument("--latent-std", type=Path, default=Path("sets/latent_std.pt"))
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--iterations", type=int, default=1000)
+    parser.add_argument("--iterations", type=int, default=1_000_000)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=14159265)

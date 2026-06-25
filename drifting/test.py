@@ -83,7 +83,6 @@ def run_eval(args: argparse.Namespace) -> None:
         "t5_clap",
         "--duration",
         "10",
-        "--use_rope",
         "--text_c_dim",
         "512",
         "--num_steps",

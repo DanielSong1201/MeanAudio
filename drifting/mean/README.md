@@ -18,6 +18,9 @@ From the repository root:
 bash drifting/scripts/mean/train_mean_1x4090.sh
 ```
 
+The default training length is `1000000` iterations. Override it with
+`ITERATIONS=<steps>`.
+
 Common debug run:
 
 ```bash
@@ -41,7 +44,20 @@ Weights are saved to:
 
 ```text
 exps/drifting/<exp_id>/<exp_id>_<iteration>.pth
+exps/drifting/<exp_id>/<exp_id>_<iteration>_ema.pth
 exps/drifting/<exp_id>/<exp_id>_last.pth
+exps/drifting/<exp_id>/<exp_id>_ema_last.pth
+```
+
+EMA is enabled by default. The EMA weights are the moving average of the raw
+student weights and are usually more stable for full evaluation than raw
+checkpoints. Defaults:
+
+```text
+EMA_DECAY=0.9999
+EMA_START=0
+EMA_UPDATE_INTERVAL=1
+EMA_DEVICE=cpu
 ```
 
 ## Training-Time Eval
@@ -54,6 +70,7 @@ eval.py --variant meanaudio_s --use_meanflow
 av-benchmark/evaluate.py
 ```
 
+Training-time eval uses the EMA checkpoint by default when EMA is enabled.
 Eval artifacts are stored under:
 
 ```text
@@ -70,10 +87,13 @@ Use environment variables to customize:
 EVAL_INTERVAL=5000 \
 EVAL_NUM_STEPS=1 \
 EVAL_CFG_STRENGTH=0.9 \
+EMA_DECAY=0.9999 \
 bash drifting/scripts/mean/train_mean_1x4090.sh
 ```
 
 Set `EVAL_INTERVAL=0` to disable training-time eval.
+Run `python drifting/mean/train.py ... --eval-raw` if you need training-time
+eval on raw student weights instead of EMA weights.
 
 ## Tests
 
@@ -92,7 +112,7 @@ MODE=teacher bash drifting/scripts/mean/test_mean.sh
 Manual full eval:
 
 ```bash
-MODEL_PATH=exps/drifting/mean_debug/mean_debug_last.pth \
+MODEL_PATH=exps/drifting/mean_debug/mean_debug_ema_last.pth \
 OUTPUT_PATH=exps/drifting_eval/manual_mean_debug \
 bash drifting/scripts/mean/eval_mean_checkpoint.sh
 ```

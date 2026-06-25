@@ -124,6 +124,37 @@ def parse_radii(text: str) -> tuple[float, ...]:
     return radii
 
 
+class ExponentialMovingAverage:
+    def __init__(self, model: torch.nn.Module, *, decay: float, device: torch.device) -> None:
+        if not 0.0 <= decay < 1.0:
+            raise ValueError(f"EMA decay must be in [0, 1), got {decay}")
+        self.decay = decay
+        self.device = device
+        self.num_updates = 0
+        self.shadow: dict[str, torch.Tensor] = {
+            key: value.detach().to(device=device).clone()
+            for key, value in model.state_dict().items()
+        }
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        self.num_updates += 1
+        model_state = model.state_dict()
+        for key, value in model_state.items():
+            value = value.detach()
+            shadow = self.shadow[key]
+            if torch.is_floating_point(shadow):
+                shadow.mul_(self.decay).add_(value.to(device=self.device, dtype=shadow.dtype), alpha=1.0 - self.decay)
+            else:
+                shadow.copy_(value.to(device=self.device))
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return {
+            key: value.detach().cpu().clone()
+            for key, value in self.shadow.items()
+        }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a one-step MeanAudio student with FluxAudio teacher-feature drifting.")
     parser.add_argument("--exp-id", default="drifting_fluxaudio_s")
@@ -139,7 +170,7 @@ def main() -> None:
     parser.add_argument("--teacher-model", default="fluxaudio_s")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--iterations", type=int, default=1000)
+    parser.add_argument("--iterations", type=int, default=1_000_000)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=14159265)
@@ -162,8 +193,15 @@ def main() -> None:
     parser.add_argument("--eval-num-steps", type=int, default=1)
     parser.add_argument("--eval-cfg-strength", type=float, default=0.9)
     parser.add_argument("--no-eval-offload-train-state", dest="eval_offload_train_state", action="store_false")
+    parser.add_argument("--disable-ema", dest="ema", action="store_false")
+    parser.add_argument("--ema-decay", type=float, default=0.9999)
+    parser.add_argument("--ema-start", type=int, default=0)
+    parser.add_argument("--ema-update-interval", type=int, default=1)
+    parser.add_argument("--ema-device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--eval-raw", dest="eval_use_ema", action="store_false", help="Evaluate raw student weights instead of EMA weights.")
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
     parser.set_defaults(eval_offload_train_state=True)
+    parser.set_defaults(ema=True, eval_use_ema=True)
     args = parser.parse_args()
 
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -178,6 +216,10 @@ def main() -> None:
     if args.eval_interval > 0:
         logger.info("Writing eval metrics to %s every %d iterations", eval_metrics_path, args.eval_interval)
     logger.info("Arguments: %s", vars(args))
+    if args.ema and args.ema_update_interval < 1:
+        raise ValueError("--ema-update-interval must be >= 1")
+    if args.ema and args.ema_device == "cuda" and device.type != "cuda":
+        raise ValueError("--ema-device cuda requires --device cuda")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -235,6 +277,17 @@ def main() -> None:
     teacher.load_weights(load_torch(args.teacher_weights, device))
     freeze_module(teacher)
     student.train()
+    ema_device = torch.device(args.ema_device if args.ema_device == "cpu" else device)
+    ema = ExponentialMovingAverage(student, decay=args.ema_decay, device=ema_device) if args.ema else None
+    if ema is not None:
+        logger.info(
+            "EMA enabled: decay=%.6f start=%d update_interval=%d device=%s eval_use_ema=%s",
+            args.ema_decay,
+            args.ema_start,
+            args.ema_update_interval,
+            ema_device,
+            args.eval_use_ema,
+        )
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     meanflow = MeanFlow()
@@ -311,6 +364,8 @@ def main() -> None:
         total_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad_norm)
         optimizer.step()
+        if ema is not None and iteration >= args.ema_start and iteration % args.ema_update_interval == 0:
+            ema.update(student)
 
         if iteration == 1 or iteration % args.log_interval == 0:
             row = {
@@ -339,11 +394,21 @@ def main() -> None:
             weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
             torch.save(student.state_dict(), weight_path)
             logger.info("Saved weights to %s", weight_path)
+            if ema is not None:
+                ema_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
+                torch.save(ema.state_dict(), ema_weight_path)
+                logger.info("Saved EMA weights to %s", ema_weight_path)
 
         if args.eval_interval > 0 and iteration % args.eval_interval == 0:
             eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
             torch.save(student.state_dict(), eval_weight_path)
-            logger.info("Saved eval weights to %s", eval_weight_path)
+            logger.info("Saved eval raw weights to %s", eval_weight_path)
+            if ema is not None:
+                ema_eval_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
+                torch.save(ema.state_dict(), ema_eval_weight_path)
+                logger.info("Saved eval EMA weights to %s", ema_eval_weight_path)
+                if args.eval_use_ema:
+                    eval_weight_path = ema_eval_weight_path
 
             if args.eval_offload_train_state:
                 logger.info("Offloading train state to CPU before eval.")
@@ -378,6 +443,10 @@ def main() -> None:
     last_path = output_dir / f"{args.exp_id}_last.pth"
     torch.save(student.state_dict(), last_path)
     logger.info("Saved final weights to %s", last_path)
+    if ema is not None:
+        ema_last_path = output_dir / f"{args.exp_id}_ema_last.pth"
+        torch.save(ema.state_dict(), ema_last_path)
+        logger.info("Saved final EMA weights to %s", ema_last_path)
     logger.info("Training completed.")
 
 
