@@ -556,15 +556,16 @@ def main() -> None:
                 "lr": optimizer.param_groups[0]["lr"],
             }
             append_metrics(metrics_path, row)
-            logger.info(
-                "it=%d total=%.6f flow=%.6f tfd=%.6f drift=%.6f anchor=%.6f grad=%.4f",
-                iteration,
-                row["total_loss"],
-                row["flow_loss"],
-                row["tfd_loss"],
-                row["drifting_loss"],
-                row["anchor_loss"],
-                row["grad_norm"],
+            progress.set_postfix(
+                {
+                    "total": f"{row['total_loss']:.4f}",
+                    "flow": f"{row['flow_loss']:.4f}",
+                    "tfd": f"{row['tfd_loss']:.4f}",
+                    "drift": f"{row['drifting_loss']:.4f}",
+                    "anchor": f"{row['anchor_loss']:.4f}",
+                    "grad": f"{row['grad_norm']:.3f}",
+                    "lr": f"{row['lr']:.2e}",
+                }
             )
 
         if is_main and iteration % args.save_interval == 0:
