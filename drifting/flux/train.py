@@ -74,15 +74,24 @@ def setup_logger(output_dir: Path, *, enabled: bool = True) -> logging.Logger:
         logger.addHandler(logging.NullHandler())
         return logger
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    log_prefix = os.environ.get("LOG_PREFIX", "").strip()
+    stream_format = f"{log_prefix} %(asctime)s | %(levelname)s | %(message)s" if log_prefix else "%(asctime)s | %(levelname)s | %(message)s"
+    stream_formatter = logging.Formatter(stream_format)
 
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
+    stream_handler.setFormatter(stream_formatter)
     file_handler = logging.FileHandler(output_dir / "train.log")
     file_handler.setFormatter(formatter)
 
     logger.addHandler(stream_handler)
     logger.addHandler(file_handler)
     return logger
+
+
+def disable_console_logging(logger: logging.Logger) -> None:
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            handler.setLevel(logging.CRITICAL + 1)
 
 
 def append_metrics(path: Path, row: dict[str, Any]) -> None:
@@ -510,7 +519,18 @@ def main() -> None:
             resume_iteration,
             args.iterations,
         )
-    progress = tqdm(range(start_iteration, args.iterations + 1), desc="flux-drifting-train", disable=not is_main)
+    tqdm_position = int(os.environ.get("TQDM_POSITION", "0"))
+    tqdm_desc = os.environ.get("TQDM_DESC", "flux-drifting-train")
+    if os.environ.get("QUIET_CONSOLE_AFTER_TQDM", "0") == "1":
+        disable_console_logging(logger)
+    progress = tqdm(
+        range(start_iteration, args.iterations + 1),
+        desc=tqdm_desc,
+        disable=not is_main,
+        position=tqdm_position,
+        leave=True,
+        dynamic_ncols=True,
+    )
     for iteration in progress:
         try:
             batch = next(data_iter)
