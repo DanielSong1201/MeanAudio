@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -130,29 +131,28 @@ def run_checkpoint_evaluation(
     driver_log = output_dir / "eval_driver.log"
     evaluate_log = output_dir / "evaluate.log"
 
-    cmd = [
-        sys.executable,
-        str(eval_entrypoint),
-        "--mode",
-        "eval",
-        "--model-path",
-        str(checkpoint_path),
-        "--output",
-        str(output_dir),
-        "--gt-cache",
-        str(gt_cache),
-        "--num-steps",
-        str(num_steps),
-        "--cfg-strength",
-        str(cfg_strength),
-        *extra_args,
-    ]
-    if use_rope:
-        cmd.append("--use-rope")
+    if extra_args:
+        raise ValueError("extra_args is not supported when using eval_drifting_checkpoint.sh")
+    env = os.environ.copy()
+    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+        env.pop(key, None)
+    env.update(
+        {
+            "PYTHON": sys.executable,
+            "TEST_ENTRYPOINT": str(eval_entrypoint),
+            "MODEL_PATH": str(checkpoint_path),
+            "OUTPUT_PATH": str(output_dir),
+            "GT_CACHE": str(gt_cache),
+            "NUM_STEPS": str(num_steps),
+            "CFG_STRENGTH": str(cfg_strength),
+            "USE_ROPE": "1" if use_rope else "0",
+        }
+    )
+    cmd = ["bash", "drifting/scripts/eval_drifting_checkpoint.sh"]
 
     logger.info("Running eval at it=%d with checkpoint=%s output=%s", iteration, checkpoint_path, output_dir)
     with driver_log.open("w") as f:
-        result = subprocess.run(cmd, text=True, stdout=f, stderr=subprocess.STDOUT)
+        result = subprocess.run(cmd, text=True, stdout=f, stderr=subprocess.STDOUT, env=env)
     if result.returncode != 0:
         tail = "\n".join(driver_log.read_text(errors="replace").splitlines()[-80:])
         logger.error("Eval failed at it=%d; driver log=%s\n%s", iteration, driver_log, tail)
