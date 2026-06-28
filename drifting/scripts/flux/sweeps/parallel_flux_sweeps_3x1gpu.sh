@@ -43,7 +43,7 @@ if [[ "${live_tqdm}" == "1" ]]; then
     CUDA_VISIBLE_DEVICES="${gpu0}" \
     TRAIN_SCRIPT="${train_script}" \
     TQDM_POSITION=0 \
-    TQDM_DESC="[GPU${gpu0}] tfd1_anchor05" \
+    TQDM_DESC="[GPU${gpu0}]" \
     LOG_PREFIX="[GPU${gpu0}]" \
     QUIET_CONSOLE_AFTER_TQDM=1 \
     EXP_ID= \
@@ -55,7 +55,7 @@ if [[ "${live_tqdm}" == "1" ]]; then
     CUDA_VISIBLE_DEVICES="${gpu1}" \
     TRAIN_SCRIPT="${train_script}" \
     TQDM_POSITION=1 \
-    TQDM_DESC="[GPU${gpu1}] tfd1_anchor1_flow03" \
+    TQDM_DESC="[GPU${gpu1}]" \
     LOG_PREFIX="[GPU${gpu1}]" \
     QUIET_CONSOLE_AFTER_TQDM=1 \
     EXP_ID= \
@@ -67,7 +67,7 @@ if [[ "${live_tqdm}" == "1" ]]; then
     CUDA_VISIBLE_DEVICES="${gpu2}" \
     TRAIN_SCRIPT="${train_script}" \
     TQDM_POSITION=2 \
-    TQDM_DESC="[GPU${gpu2}] lr1e5_tfd1_anchor1_flow05" \
+    TQDM_DESC="[GPU${gpu2}]" \
     LOG_PREFIX="[GPU${gpu2}]" \
     QUIET_CONSOLE_AFTER_TQDM=1 \
     EXP_ID= \
