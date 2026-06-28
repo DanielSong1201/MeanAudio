@@ -3,10 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
-python drifting/flux/train.py \
-  --exp-id "${EXP_ID:-flux_drifting_s_1x4090}" \
+torchrun --standalone --nproc_per_node="${NPROC_PER_NODE:-2}" drifting/flux/train.py \
+  --exp-id "${EXP_ID:-flux_drifting_s_2x4090}" \
   --teacher-weights "${TEACHER_WEIGHTS:-weights/fluxaudio_s_full.pth}" \
   --student-init "${STUDENT_INIT:-weights/fluxaudio_s_full.pth}" \
   --batch-size "${BATCH_SIZE:-4}" \

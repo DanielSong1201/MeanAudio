@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
 import random
 import sys
 from pathlib import Path
@@ -11,11 +12,20 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
+import torch.nn as nn
 import yaml
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from drifting.eval_helpers import empty_cuda_cache, move_optimizer_state, run_checkpoint_evaluation
+from drifting.eval_helpers import (
+    ExponentialMovingAverage,
+    empty_cuda_cache,
+    move_optimizer_state,
+    run_checkpoint_evaluation,
+)
 from meanaudio.model.networks import get_mean_audio
 from meanaudio.model.teacher_feature_drifting import TeacherFeatureDriftingLoss
 
@@ -54,11 +64,14 @@ class AudioCapsNpzDataset(Dataset):
         }
 
 
-def setup_logger(output_dir: Path) -> logging.Logger:
+def setup_logger(output_dir: Path, *, enabled: bool = True) -> logging.Logger:
     output_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("drifting.flux")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
+    if not enabled:
+        logger.addHandler(logging.NullHandler())
+        return logger
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -125,6 +138,70 @@ def parse_radii(text: str) -> tuple[float, ...]:
     if not radii:
         raise ValueError("At least one radius is required.")
     return radii
+
+
+def setup_distributed() -> tuple[bool, int, int, int]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False, 0, 0, 1
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+    return True, rank, local_rank, world_size
+
+
+def cleanup_distributed(enabled: bool) -> None:
+    if enabled and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def reduce_scalar(value: torch.Tensor, *, distributed: bool, world_size: int) -> torch.Tensor:
+    value = value.detach().float()
+    if distributed:
+        dist.all_reduce(value, op=dist.ReduceOp.SUM)
+        value = value / world_size
+    return value
+
+
+class FluxDriftingModule(nn.Module):
+    def __init__(
+        self,
+        *,
+        student: nn.Module,
+        teacher: nn.Module,
+        criterion: TeacherFeatureDriftingLoss,
+        feature_layers: tuple[str, ...],
+        feature_noise: float,
+        lambda_flow: float,
+    ) -> None:
+        super().__init__()
+        self.student = student
+        self.teacher = teacher
+        self.criterion = criterion
+        self.feature_layers = feature_layers
+        self.feature_noise = feature_noise
+        self.lambda_flow = lambda_flow
+
+    def forward(
+        self,
+        text_f: torch.Tensor,
+        text_f_c: torch.Tensor,
+        a_mean: torch.Tensor,
+        a_std: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        return one_step_flux_loss(
+            student=self.student,
+            teacher=self.teacher,
+            criterion=self.criterion,
+            text_f=text_f,
+            text_f_c=text_f_c,
+            a_mean=a_mean,
+            a_std=a_std,
+            feature_layers=self.feature_layers,
+            feature_noise=self.feature_noise,
+            lambda_flow=self.lambda_flow,
+        )
 
 
 def build_flux_model(
@@ -239,22 +316,37 @@ def main() -> None:
     parser.add_argument("--eval-num-steps", type=int, default=1)
     parser.add_argument("--eval-cfg-strength", type=float, default=4.5)
     parser.add_argument("--no-eval-offload-train-state", dest="eval_offload_train_state", action="store_false")
+    parser.add_argument("--disable-ema", dest="ema", action="store_false")
+    parser.add_argument("--ema-decay", type=float, default=0.9999)
+    parser.add_argument("--ema-start", type=int, default=0)
+    parser.add_argument("--ema-update-interval", type=int, default=1)
+    parser.add_argument("--ema-device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--eval-raw", dest="eval_use_ema", action="store_false", help="Evaluate raw student weights instead of EMA weights.")
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
     parser.set_defaults(eval_offload_train_state=True)
+    parser.set_defaults(ema=True, eval_use_ema=True)
     args = parser.parse_args()
 
+    distributed, rank, local_rank, world_size = setup_distributed()
+    is_main = rank == 0
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available.")
-    device = torch.device(args.device)
+    device = torch.device(f"cuda:{local_rank}" if distributed else args.device)
     output_dir = args.output_root / args.exp_id
-    logger = setup_logger(output_dir)
+    logger = setup_logger(output_dir, enabled=is_main)
     metrics_path = output_dir / "metrics.csv"
     eval_metrics_path = output_dir / "eval_metrics.csv"
     logger.info("Writing logs to %s", output_dir / "train.log")
     logger.info("Writing metrics to %s", metrics_path)
     if args.eval_interval > 0:
         logger.info("Writing eval metrics to %s every %d iterations", eval_metrics_path, args.eval_interval)
+    if distributed:
+        logger.info("Distributed training enabled: world_size=%d", world_size)
     logger.info("Arguments: %s", vars(args))
+    if args.ema and args.ema_update_interval < 1:
+        raise ValueError("--ema-update-interval must be >= 1")
+    if args.ema and args.ema_device == "cuda" and device.type != "cuda":
+        raise ValueError("--ema-device cuda requires --device cuda")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -265,10 +357,18 @@ def main() -> None:
     data_cfg = load_data_config(args.data_config, args.train_split)
     split_cfg = data_cfg[args.train_split]
     dataset = AudioCapsNpzDataset(tsv_path=Path(split_cfg["tsv"]), npz_dir=Path(split_cfg["npz_dir"]))
+    sampler = DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,
+        drop_last=True,
+    ) if distributed else None
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=True,
@@ -309,6 +409,17 @@ def main() -> None:
     )
     freeze_module(teacher)
     student.train()
+    ema_device = torch.device(args.ema_device if args.ema_device == "cpu" else device)
+    ema = ExponentialMovingAverage(student, decay=args.ema_decay, device=ema_device) if args.ema else None
+    if ema is not None:
+        logger.info(
+            "EMA enabled: decay=%.6f start=%d update_interval=%d device=%s eval_use_ema=%s",
+            args.ema_decay,
+            args.ema_start,
+            args.ema_update_interval,
+            ema_device,
+            args.eval_use_ema,
+        )
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     criterion = TeacherFeatureDriftingLoss(
@@ -321,12 +432,35 @@ def main() -> None:
     feature_layers = parse_layers(args.feature_layers)
     use_amp = args.amp and device.type == "cuda"
     autocast_dtype = torch.bfloat16 if use_amp else torch.float32
+    train_module = FluxDriftingModule(
+        student=student,
+        teacher=teacher,
+        criterion=criterion,
+        feature_layers=feature_layers,
+        feature_noise=args.feature_noise,
+        lambda_flow=args.lambda_flow,
+    ).to(device)
+    if distributed:
+        train_module = DistributedDataParallel(
+            train_module,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=False,
+        )
 
+    sampler_epoch = 0
+    if sampler is not None:
+        sampler.set_epoch(sampler_epoch)
     data_iter = iter(loader)
-    for iteration in tqdm(range(1, args.iterations + 1), desc="flux-drifting-train"):
+    progress = tqdm(range(1, args.iterations + 1), desc="flux-drifting-train", disable=not is_main)
+    for iteration in progress:
         try:
             batch = next(data_iter)
         except StopIteration:
+            sampler_epoch += 1
+            if sampler is not None:
+                sampler.set_epoch(sampler_epoch)
             data_iter = iter(loader)
             batch = next(data_iter)
 
@@ -336,32 +470,31 @@ def main() -> None:
         a_std = batch["a_std"].to(device=device, non_blocking=True)
 
         with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=use_amp):
-            total_loss, loss_parts = one_step_flux_loss(
-                student=student,
-                teacher=teacher,
-                criterion=criterion,
-                text_f=text_f,
-                text_f_c=text_f_c,
-                a_mean=a_mean,
-                a_std=a_std,
-                feature_layers=feature_layers,
-                feature_noise=args.feature_noise,
-                lambda_flow=args.lambda_flow,
-            )
+            total_loss, loss_parts = train_module(text_f, text_f_c, a_mean, a_std)
 
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), args.clip_grad_norm)
         optimizer.step()
+        if ema is not None and iteration >= args.ema_start and iteration % args.ema_update_interval == 0:
+            ema.update(student)
 
-        if iteration == 1 or iteration % args.log_interval == 0:
+        should_log = iteration == 1 or iteration % args.log_interval == 0
+        if should_log:
+            reduced_total_loss = reduce_scalar(total_loss, distributed=distributed, world_size=world_size)
+            reduced_flow_loss = reduce_scalar(loss_parts["flow_loss"], distributed=distributed, world_size=world_size)
+            reduced_tfd_loss = reduce_scalar(loss_parts["tfd_loss"], distributed=distributed, world_size=world_size)
+            reduced_drifting_loss = reduce_scalar(loss_parts["drifting_loss"], distributed=distributed, world_size=world_size)
+            reduced_anchor_loss = reduce_scalar(loss_parts["anchor_loss"], distributed=distributed, world_size=world_size)
+
+        if is_main and should_log:
             row = {
                 "iteration": iteration,
-                "total_loss": float(total_loss.detach().float().item()),
-                "flow_loss": float(loss_parts["flow_loss"].float().item()),
-                "tfd_loss": float(loss_parts["tfd_loss"].float().item()),
-                "drifting_loss": float(loss_parts["drifting_loss"].float().item()),
-                "anchor_loss": float(loss_parts["anchor_loss"].float().item()),
+                "total_loss": float(reduced_total_loss.item()),
+                "flow_loss": float(reduced_flow_loss.item()),
+                "tfd_loss": float(reduced_tfd_loss.item()),
+                "drifting_loss": float(reduced_drifting_loss.item()),
+                "anchor_loss": float(reduced_anchor_loss.item()),
                 "grad_norm": float(grad_norm.detach().float().item()),
                 "lr": optimizer.param_groups[0]["lr"],
             }
@@ -377,15 +510,29 @@ def main() -> None:
                 row["grad_norm"],
             )
 
-        if iteration % args.save_interval == 0:
+        if is_main and iteration % args.save_interval == 0:
             weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
             torch.save(student.state_dict(), weight_path)
             logger.info("Saved weights to %s", weight_path)
+            if ema is not None:
+                ema_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
+                torch.save(ema.state_dict(), ema_weight_path)
+                logger.info("Saved EMA weights to %s", ema_weight_path)
 
-        if args.eval_interval > 0 and iteration % args.eval_interval == 0:
+        should_eval = args.eval_interval > 0 and iteration % args.eval_interval == 0
+        if distributed and should_eval:
+            dist.barrier()
+
+        if is_main and should_eval:
             eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
             torch.save(student.state_dict(), eval_weight_path)
-            logger.info("Saved eval weights to %s", eval_weight_path)
+            logger.info("Saved eval raw weights to %s", eval_weight_path)
+            if ema is not None:
+                ema_eval_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
+                torch.save(ema.state_dict(), ema_eval_weight_path)
+                logger.info("Saved eval EMA weights to %s", ema_eval_weight_path)
+                if args.eval_use_ema:
+                    eval_weight_path = ema_eval_weight_path
 
             if args.eval_offload_train_state:
                 logger.info("Offloading train state to CPU before eval.")
@@ -417,10 +564,19 @@ def main() -> None:
                     student.train()
                     empty_cuda_cache()
 
-    last_path = output_dir / f"{args.exp_id}_last.pth"
-    torch.save(student.state_dict(), last_path)
-    logger.info("Saved final weights to %s", last_path)
-    logger.info("FluxAudio drifting training completed.")
+        if distributed and should_eval:
+            dist.barrier()
+
+    if is_main:
+        last_path = output_dir / f"{args.exp_id}_last.pth"
+        torch.save(student.state_dict(), last_path)
+        logger.info("Saved final weights to %s", last_path)
+        if ema is not None:
+            ema_last_path = output_dir / f"{args.exp_id}_ema_last.pth"
+            torch.save(ema.state_dict(), ema_last_path)
+            logger.info("Saved final EMA weights to %s", ema_last_path)
+        logger.info("FluxAudio drifting training completed.")
+    cleanup_distributed(distributed)
 
 
 if __name__ == "__main__":

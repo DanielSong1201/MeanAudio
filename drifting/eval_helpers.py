@@ -47,6 +47,37 @@ def empty_cuda_cache() -> None:
         torch.cuda.empty_cache()
 
 
+class ExponentialMovingAverage:
+    def __init__(self, model: torch.nn.Module, *, decay: float, device: torch.device) -> None:
+        if not 0.0 <= decay < 1.0:
+            raise ValueError(f"EMA decay must be in [0, 1), got {decay}")
+        self.decay = decay
+        self.device = device
+        self.num_updates = 0
+        self.shadow: dict[str, torch.Tensor] = {
+            key: value.detach().to(device=device).clone()
+            for key, value in model.state_dict().items()
+        }
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        self.num_updates += 1
+        model_state = model.state_dict()
+        for key, value in model_state.items():
+            value = value.detach()
+            shadow = self.shadow[key]
+            if torch.is_floating_point(shadow):
+                shadow.mul_(self.decay).add_(value.to(device=self.device, dtype=shadow.dtype), alpha=1.0 - self.decay)
+            else:
+                shadow.copy_(value.to(device=self.device))
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return {
+            key: value.detach().cpu().clone()
+            for key, value in self.shadow.items()
+        }
+
+
 def _normalize_metric_name(name: str) -> str:
     name = name.strip().lower()
     name = re.sub(r"[^a-z0-9]+", "_", name)
