@@ -19,7 +19,7 @@ from tqdm import tqdm
 from meanaudio.model.mean_flow import MeanFlow
 from meanaudio.model.networks import get_mean_audio
 from meanaudio.model.teacher_feature_drifting import TeacherFeatureDriftingLoss
-from drifting.eval_helpers import empty_cuda_cache, move_optimizer_state, run_checkpoint_evaluation
+from drifting.eval_helpers import empty_cuda_cache, find_latest_weight_checkpoint, move_optimizer_state, run_checkpoint_evaluation
 
 
 def load_torch(path: Path, map_location: str | torch.device):
@@ -154,6 +154,18 @@ class ExponentialMovingAverage:
             for key, value in self.shadow.items()
         }
 
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
+        missing = set(self.shadow) - set(state_dict)
+        unexpected = set(state_dict) - set(self.shadow)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"EMA state_dict mismatch: missing={sorted(missing)} unexpected={sorted(unexpected)}"
+            )
+        self.shadow = {
+            key: value.detach().to(device=self.device).clone()
+            for key, value in state_dict.items()
+        }
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a one-step MeanAudio student with FluxAudio teacher-feature drifting.")
@@ -200,8 +212,9 @@ def main() -> None:
     parser.add_argument("--ema-device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--eval-raw", dest="eval_use_ema", action="store_false", help="Evaluate raw student weights instead of EMA weights.")
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
+    parser.add_argument("--no-auto-resume", dest="auto_resume", action="store_false", help="Start from student init even if exp-id checkpoints exist.")
     parser.set_defaults(eval_offload_train_state=True)
-    parser.set_defaults(ema=True, eval_use_ema=True)
+    parser.set_defaults(ema=True, eval_use_ema=True, auto_resume=True)
     args = parser.parse_args()
 
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -226,6 +239,19 @@ def main() -> None:
     random.seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+    resume_iteration = 0
+    resume_path: Path | None = None
+    if args.auto_resume:
+        latest = find_latest_weight_checkpoint(output_dir, args.exp_id)
+        if latest is not None:
+            resume_iteration, resume_path = latest
+            logger.info("Auto-resume found checkpoint: it=%d path=%s", resume_iteration, resume_path)
+            logger.info("Optimizer state is initialized fresh because existing checkpoints are weights-only.")
+        else:
+            logger.info("Auto-resume found no numeric checkpoint in %s; starting from student init.", output_dir)
+    else:
+        logger.info("Auto-resume disabled; starting from student init.")
 
     data_cfg = load_data_config(args.data_config, args.train_split)
     split_cfg = data_cfg[args.train_split]
@@ -273,6 +299,9 @@ def main() -> None:
 
     logger.info("Loading student init: %s", args.student_init)
     student.load_weights(load_torch(args.student_init, device))
+    if resume_path is not None:
+        logger.info("Loading resumed student weights: %s", resume_path)
+        student.load_weights(load_torch(resume_path, device))
     logger.info("Loading teacher weights: %s", args.teacher_weights)
     teacher.load_weights(load_torch(args.teacher_weights, device))
     freeze_module(teacher)
@@ -280,6 +309,13 @@ def main() -> None:
     ema_device = torch.device(args.ema_device if args.ema_device == "cpu" else device)
     ema = ExponentialMovingAverage(student, decay=args.ema_decay, device=ema_device) if args.ema else None
     if ema is not None:
+        if resume_path is not None:
+            ema_resume_path = output_dir / f"{args.exp_id}_{resume_iteration}_ema.pth"
+            if ema_resume_path.exists():
+                logger.info("Loading resumed EMA weights: %s", ema_resume_path)
+                ema.load_state_dict(load_torch(ema_resume_path, "cpu"))
+            else:
+                logger.warning("EMA checkpoint not found at %s; initializing EMA from resumed student weights.", ema_resume_path)
         logger.info(
             "EMA enabled: decay=%.6f start=%d update_interval=%d device=%s eval_use_ema=%s",
             args.ema_decay,
@@ -303,7 +339,30 @@ def main() -> None:
     autocast_dtype = torch.bfloat16 if use_amp else torch.float32
 
     data_iter = iter(loader)
-    for iteration in tqdm(range(1, args.iterations + 1), desc="drifting-train"):
+    start_iteration = resume_iteration + 1
+    if resume_path is None:
+        logger.info(
+            "TRAIN_START mode=fresh checkpoint=None start_iteration=%d target_iterations=%d output_dir=%s",
+            start_iteration,
+            args.iterations,
+            output_dir,
+        )
+    else:
+        logger.info(
+            "TRAIN_START mode=resume checkpoint=%s resume_iteration=%d start_iteration=%d target_iterations=%d output_dir=%s",
+            resume_path,
+            resume_iteration,
+            start_iteration,
+            args.iterations,
+            output_dir,
+        )
+    if start_iteration > args.iterations:
+        logger.info(
+            "Resume checkpoint iteration %d is already >= target iterations %d; no training steps will run.",
+            resume_iteration,
+            args.iterations,
+        )
+    for iteration in tqdm(range(start_iteration, args.iterations + 1), desc="drifting-train"):
         try:
             batch = next(data_iter)
         except StopIteration:

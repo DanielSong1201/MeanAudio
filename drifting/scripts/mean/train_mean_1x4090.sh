@@ -4,6 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
+AUTO_RESUME_ARGS=()
+if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
+  AUTO_RESUME_ARGS=(--no-auto-resume)
+fi
 
 python drifting/mean/train.py \
   --exp-id "${EXP_ID:-mean_drifting_s_1x4090}" \
@@ -31,4 +36,5 @@ python drifting/mean/train.py \
   --feature-noise "${FEATURE_NOISE:-0.1}" \
   --pool-tokens "${POOL_TOKENS:-64}" \
   --use-rope \
-  --amp
+  --amp \
+  "${AUTO_RESUME_ARGS[@]}"

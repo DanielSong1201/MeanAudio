@@ -21,6 +21,29 @@ bash drifting/scripts/mean/train_mean_1x4090.sh
 The default training length is `1000000` iterations. Override it with
 `ITERATIONS=<steps>`.
 
+Training auto-resumes by default. Before the first training step, the script
+looks in:
+
+```text
+exps/drifting/<exp_id>/
+```
+
+for the latest numeric raw checkpoint:
+
+```text
+<exp_id>_<iteration>.pth
+```
+
+If found, it loads that student checkpoint, loads the matching
+`<exp_id>_<iteration>_ema.pth` when present, and continues from
+`iteration + 1` until the target `ITERATIONS`. Existing checkpoints are
+weights-only, so the optimizer is initialized fresh on resume. Disable this
+behavior with:
+
+```bash
+AUTO_RESUME=0 bash drifting/scripts/mean/train_mean_1x4090.sh
+```
+
 Common debug run:
 
 ```bash

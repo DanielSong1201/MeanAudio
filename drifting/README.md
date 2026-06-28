@@ -48,6 +48,23 @@ bash drifting/scripts/train_drifting_1x4090.sh
 The default training length is `1000000` iterations. Override it with
 `ITERATIONS=<steps>`.
 
+Training auto-resumes by default. The trainer checks the target directory
+derived from `EXP_ID` before the first step:
+
+```text
+<output_root>/<exp_id>/
+```
+
+If a numeric checkpoint such as `<exp_id>_<iteration>.pth` exists, the latest
+one is loaded and training continues from `iteration + 1` until the target
+`ITERATIONS`. The matching `<exp_id>_<iteration>_ema.pth` is also loaded when
+present. Existing checkpoints are weights-only, so the optimizer is initialized
+fresh on resume. To force a new run from the configured student init, use:
+
+```bash
+AUTO_RESUME=0 bash drifting/scripts/train_drifting_1x4090.sh
+```
+
 The training entrypoint writes logs and metrics to:
 
 ```text

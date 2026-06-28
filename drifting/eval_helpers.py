@@ -17,6 +17,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _METRIC_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9_ ./()-]{0,64})\s*[:=]\s*(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 )
+_CKPT_RE_TEMPLATE = r"^{exp_id}_(\d+)\.pth$"
 
 
 def append_eval_metrics(path: Path, row: dict[str, Any]) -> None:
@@ -77,6 +78,35 @@ class ExponentialMovingAverage:
             key: value.detach().cpu().clone()
             for key, value in self.shadow.items()
         }
+
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
+        missing = set(self.shadow) - set(state_dict)
+        unexpected = set(state_dict) - set(self.shadow)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"EMA state_dict mismatch: missing={sorted(missing)} unexpected={sorted(unexpected)}"
+            )
+        self.shadow = {
+            key: value.detach().to(device=self.device).clone()
+            for key, value in state_dict.items()
+        }
+
+
+def find_latest_weight_checkpoint(output_dir: Path, exp_id: str) -> tuple[int, Path] | None:
+    if not output_dir.exists():
+        return None
+    pattern = re.compile(_CKPT_RE_TEMPLATE.format(exp_id=re.escape(exp_id)))
+    latest: tuple[int, Path] | None = None
+    for path in output_dir.iterdir():
+        if not path.is_file():
+            continue
+        match = pattern.match(path.name)
+        if match is None:
+            continue
+        iteration = int(match.group(1))
+        if latest is None or iteration > latest[0]:
+            latest = (iteration, path)
+    return latest
 
 
 def _normalize_metric_name(name: str) -> str:

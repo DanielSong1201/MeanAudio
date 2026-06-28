@@ -23,6 +23,7 @@ from tqdm import tqdm
 from drifting.eval_helpers import (
     ExponentialMovingAverage,
     empty_cuda_cache,
+    find_latest_weight_checkpoint,
     move_optimizer_state,
     run_checkpoint_evaluation,
 )
@@ -323,8 +324,9 @@ def main() -> None:
     parser.add_argument("--ema-device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--eval-raw", dest="eval_use_ema", action="store_false", help="Evaluate raw student weights instead of EMA weights.")
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
+    parser.add_argument("--no-auto-resume", dest="auto_resume", action="store_false", help="Start from student init even if exp-id checkpoints exist.")
     parser.set_defaults(eval_offload_train_state=True)
-    parser.set_defaults(ema=True, eval_use_ema=True)
+    parser.set_defaults(ema=True, eval_use_ema=True, auto_resume=True)
     args = parser.parse_args()
 
     distributed, rank, local_rank, world_size = setup_distributed()
@@ -353,6 +355,28 @@ def main() -> None:
     random.seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+    resume_iteration = 0
+    resume_path: Path | None = None
+    if args.auto_resume:
+        latest = None
+        if is_main:
+            latest = find_latest_weight_checkpoint(output_dir, args.exp_id)
+        if distributed:
+            payload: list[tuple[int, str] | None] = [
+                None if latest is None else (latest[0], str(latest[1]))
+            ]
+            dist.broadcast_object_list(payload, src=0)
+            latest_payload = payload[0]
+            latest = None if latest_payload is None else (latest_payload[0], Path(latest_payload[1]))
+        if latest is not None:
+            resume_iteration, resume_path = latest
+            logger.info("Auto-resume found checkpoint: it=%d path=%s", resume_iteration, resume_path)
+            logger.info("Optimizer state is initialized fresh because existing checkpoints are weights-only.")
+        else:
+            logger.info("Auto-resume found no numeric checkpoint in %s; starting from student init.", output_dir)
+    else:
+        logger.info("Auto-resume disabled; starting from student init.")
 
     data_cfg = load_data_config(args.data_config, args.train_split)
     split_cfg = data_cfg[args.train_split]
@@ -397,6 +421,9 @@ def main() -> None:
         empty_text_c=empty_text_c,
         use_rope=args.use_rope,
     )
+    if resume_path is not None:
+        logger.info("Loading resumed FluxAudio student weights: %s", resume_path)
+        student.load_weights(load_torch(resume_path, device))
     logger.info("Loading frozen FluxAudio teacher: %s", args.teacher_weights)
     teacher = build_flux_model(
         weights_path=args.teacher_weights,
@@ -412,6 +439,13 @@ def main() -> None:
     ema_device = torch.device(args.ema_device if args.ema_device == "cpu" else device)
     ema = ExponentialMovingAverage(student, decay=args.ema_decay, device=ema_device) if args.ema else None
     if ema is not None:
+        if resume_path is not None:
+            ema_resume_path = output_dir / f"{args.exp_id}_{resume_iteration}_ema.pth"
+            if ema_resume_path.exists():
+                logger.info("Loading resumed EMA weights: %s", ema_resume_path)
+                ema.load_state_dict(load_torch(ema_resume_path, "cpu"))
+            else:
+                logger.warning("EMA checkpoint not found at %s; initializing EMA from resumed student weights.", ema_resume_path)
         logger.info(
             "EMA enabled: decay=%.6f start=%d update_interval=%d device=%s eval_use_ema=%s",
             args.ema_decay,
@@ -453,7 +487,30 @@ def main() -> None:
     if sampler is not None:
         sampler.set_epoch(sampler_epoch)
     data_iter = iter(loader)
-    progress = tqdm(range(1, args.iterations + 1), desc="flux-drifting-train", disable=not is_main)
+    start_iteration = resume_iteration + 1
+    if resume_path is None:
+        logger.info(
+            "TRAIN_START mode=fresh checkpoint=None start_iteration=%d target_iterations=%d output_dir=%s",
+            start_iteration,
+            args.iterations,
+            output_dir,
+        )
+    else:
+        logger.info(
+            "TRAIN_START mode=resume checkpoint=%s resume_iteration=%d start_iteration=%d target_iterations=%d output_dir=%s",
+            resume_path,
+            resume_iteration,
+            start_iteration,
+            args.iterations,
+            output_dir,
+        )
+    if start_iteration > args.iterations:
+        logger.info(
+            "Resume checkpoint iteration %d is already >= target iterations %d; no training steps will run.",
+            resume_iteration,
+            args.iterations,
+        )
+    progress = tqdm(range(start_iteration, args.iterations + 1), desc="flux-drifting-train", disable=not is_main)
     for iteration in progress:
         try:
             batch = next(data_iter)

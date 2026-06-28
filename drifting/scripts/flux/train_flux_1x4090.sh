@@ -29,6 +29,11 @@ LAMBDA_TFD_VALUE="${LAMBDA_TFD:-0.2}"
 LAMBDA_ANCHOR_VALUE="${LAMBDA_ANCHOR:-0.05}"
 FEATURE_NOISE_VALUE="${FEATURE_NOISE:-0.1}"
 POOL_TOKENS_VALUE="${POOL_TOKENS:-64}"
+AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
+AUTO_RESUME_ARGS=()
+if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
+  AUTO_RESUME_ARGS=(--no-auto-resume)
+fi
 
 printf 'train_config EXP_ID=%s\n' "${EXP_ID_VALUE}"
 printf 'train_config GPU_COUNT=%s\n' "1"
@@ -58,6 +63,7 @@ printf 'train_config LAMBDA_TFD=%s\n' "${LAMBDA_TFD_VALUE}"
 printf 'train_config LAMBDA_ANCHOR=%s\n' "${LAMBDA_ANCHOR_VALUE}"
 printf 'train_config FEATURE_NOISE=%s\n' "${FEATURE_NOISE_VALUE}"
 printf 'train_config POOL_TOKENS=%s\n' "${POOL_TOKENS_VALUE}"
+printf 'train_config AUTO_RESUME=%s\n' "${AUTO_RESUME_VALUE}"
 printf 'train_config USE_ROPE=%s\n' "1"
 printf 'train_config AMP=%s\n' "1"
 
@@ -87,4 +93,5 @@ python drifting/flux/train.py \
   --feature-noise "${FEATURE_NOISE_VALUE}" \
   --pool-tokens "${POOL_TOKENS_VALUE}" \
   --use-rope \
-  --amp
+  --amp \
+  "${AUTO_RESUME_ARGS[@]}"
