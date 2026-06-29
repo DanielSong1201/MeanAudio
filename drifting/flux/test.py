@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -195,6 +196,136 @@ def check_train_step(args: argparse.Namespace, device: torch.device) -> None:
         raise AssertionError("Frozen teacher unexpectedly received gradients.")
 
 
+def _read_eval_manifest(tsv_path: Path) -> list[dict[str, str]]:
+    with tsv_path.open("r", newline="") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    if not rows:
+        raise ValueError(f"No rows found in {tsv_path}")
+    for key in ("id", "caption"):
+        if key not in rows[0]:
+            raise KeyError(f"Missing {key!r} column in {tsv_path}")
+    return rows
+
+
+def _load_eval_condition(npz_dir: Path, idx: int, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    import numpy as np
+
+    npz_path = npz_dir / f"{idx}.npz"
+    if not npz_path.exists():
+        raise FileNotFoundError(f"Missing eval condition npz: {npz_path}")
+    with np.load(npz_path) as data:
+        text_f = torch.from_numpy(data["text_features"]).unsqueeze(0).to(device=device, dtype=dtype)
+        text_f_c = torch.from_numpy(data["text_features_c"]).unsqueeze(0).to(device=device, dtype=dtype)
+    return text_f, text_f_c
+
+
+@torch.inference_mode()
+def generate_audio_from_precomputed_conditions(args: argparse.Namespace, device: torch.device, dtype: torch.dtype) -> None:
+    import torchaudio
+    from tqdm import tqdm
+
+    from drifting.flux.train import build_flux_model, maybe_load_empty_features, setup_logger
+    from meanaudio.model.flow_matching import FlowMatching
+    from meanaudio.model.sequence_config import CONFIG_16K
+    from meanaudio.model.utils.features_utils import FeaturesUtils
+
+    audio_dir = args.output / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    if not args.eval_tsv.exists():
+        raise FileNotFoundError(f"Missing eval TSV: {args.eval_tsv}")
+    if not args.eval_npz_dir.exists():
+        raise FileNotFoundError(f"Missing eval npz directory: {args.eval_npz_dir}")
+    if not args.vae_weights.exists():
+        raise FileNotFoundError(f"Missing VAE weights: {args.vae_weights}")
+    if not args.vocoder_weights.exists():
+        raise FileNotFoundError(f"Missing vocoder weights: {args.vocoder_weights}")
+
+    rows = _read_eval_manifest(args.eval_tsv)
+    logger = setup_logger(args.output)
+    latent_mean = load_torch(args.latent_mean, "cpu")
+    latent_std = load_torch(args.latent_std, "cpu")
+    empty_text, empty_text_c = maybe_load_empty_features(
+        args.weights_dir,
+        text_seq_len=77,
+        text_dim=1024,
+        text_c_dim=512,
+        logger=logger,
+    )
+    net = build_flux_model(
+        weights_path=args.model_path,
+        device=device,
+        latent_mean=latent_mean,
+        latent_std=latent_std,
+        empty_text=empty_text,
+        empty_text_c=empty_text_c,
+        use_rope=args.use_rope,
+    ).to(device=device, dtype=dtype).eval()
+
+    feature_utils = FeaturesUtils(
+        tod_vae_ckpt=str(args.vae_weights),
+        enable_conditions=False,
+        encoder_name="t5_clap",
+        mode="16k",
+        bigvgan_vocoder_ckpt=str(args.vocoder_weights),
+        need_vae_encoder=False,
+    ).to(device=device, dtype=dtype).eval()
+
+    seq_cfg = CONFIG_16K
+    seq_cfg.duration = args.duration
+    net.update_seq_lengths(seq_cfg.latent_seq_len)
+    fm = FlowMatching(min_sigma=0, inference_mode="euler", num_steps=args.num_steps)
+    rng = torch.Generator(device=device)
+    rng.manual_seed(args.seed)
+
+    tqdm_position = int(os.environ.get("EVAL_TQDM_POSITION", os.environ.get("TQDM_POSITION", "0")))
+    tqdm_desc = os.environ.get("EVAL_TQDM_DESC", "generate-audio")
+    tqdm_leave = os.environ.get("EVAL_TQDM_LEAVE", "0") == "1"
+    for idx in tqdm(
+        range(len(rows)),
+        desc=tqdm_desc,
+        dynamic_ncols=True,
+        position=tqdm_position,
+        leave=tqdm_leave,
+    ):
+        text_f, text_f_c = _load_eval_condition(args.eval_npz_dir, idx, device=device, dtype=dtype)
+        x0 = torch.randn(
+            1,
+            net.latent_seq_len,
+            net.latent_dim,
+            device=device,
+            dtype=dtype,
+            generator=rng,
+        )
+        conditions = net.preprocess_conditions(text_f, text_f_c)
+        empty_conditions = net.get_empty_conditions(1)
+        cfg_ode_wrapper = lambda t, x: net.ode_wrapper(t, x, conditions, empty_conditions, args.cfg_strength)
+        x1 = fm.to_data(cfg_ode_wrapper, x0)
+        x1 = net.unnormalize(x1)
+        spec = feature_utils.decode(x1)
+        audio = feature_utils.vocode(spec).float().cpu()[0]
+        torchaudio.save(audio_dir / f"{rows[idx]['id']}.flac", audio, seq_cfg.sampling_rate)
+
+
+def _run_and_tee(cmd: list[str], log_path: Path) -> None:
+    with log_path.open("w") as f:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            f.write(line)
+            f.flush()
+            print(line, end="")
+        returncode = process.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+
 def run_eval(args: argparse.Namespace) -> None:
     setup_eval_logger()
     output = args.output
@@ -203,31 +334,14 @@ def run_eval(args: argparse.Namespace) -> None:
     log.info("model_path=%s", args.model_path)
     log.info("output=%s", output)
     log.info("num_steps=%s cfg_strength=%s use_rope=%s", args.num_steps, args.cfg_strength, args.use_rope)
-    eval_cmd = [
-        sys.executable,
-        "eval.py",
-        "--variant",
-        "fluxaudio_s",
-        "--model_path",
-        str(args.model_path),
-        "--output",
-        str(output / "audio"),
-        "--cfg_strength",
-        str(args.cfg_strength),
-        "--encoder_name",
-        "t5_clap",
-        "--duration",
-        "10",
-        "--text_c_dim",
-        "512",
-        "--num_steps",
-        str(args.num_steps),
-        "--full_precision",
-    ]
-    if args.use_rope:
-        eval_cmd.append("--use_rope")
-    log.info("Step 1/2: generating audio with eval.py")
-    subprocess.run(eval_cmd, check=True)
+    log.info("eval_tsv=%s", args.eval_tsv)
+    log.info("eval_npz_dir=%s", args.eval_npz_dir)
+    log.info("Step 1/2: generating audio from precomputed t5_clap conditions")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but not available.")
+    device = torch.device(args.device)
+    dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
+    generate_audio_from_precomputed_conditions(args, device, dtype)
     log.info("Step 1/2 complete: audio_dir=%s", output / "audio")
 
     bench_cmd = [
@@ -246,8 +360,7 @@ def run_eval(args: argparse.Namespace) -> None:
         "--skip_video_related",
     ]
     log.info("Step 2/2: computing metrics with av-benchmark/evaluate.py")
-    with (output / "evaluate.log").open("w") as f:
-        subprocess.run(bench_cmd, check=True, stdout=f, stderr=subprocess.STDOUT)
+    _run_and_tee(bench_cmd, output / "evaluate.log")
     log.info("Step 2/2 complete: evaluate_log=%s", output / "evaluate.log")
     print(f"[ok] evaluation log written to {output / 'evaluate.log'}")
 
@@ -277,6 +390,12 @@ def main() -> None:
     parser.add_argument("--model-path", type=Path, default=Path("exps/drifting_flux/flux_drifting_s_1x4090/flux_drifting_s_1x4090_last.pth"))
     parser.add_argument("--output", type=Path, default=Path("exps/drifting_flux_eval"))
     parser.add_argument("--gt-cache", type=Path, default=Path("data/audiocaps/test-features"))
+    parser.add_argument("--eval-tsv", type=Path, default=Path("sets/test-audiocaps.tsv"))
+    parser.add_argument("--eval-npz-dir", type=Path, default=Path("data/audiocaps/test-npz-t5-clap"))
+    parser.add_argument("--vae-weights", type=Path, default=Path("weights/v1-16.pth"))
+    parser.add_argument("--vocoder-weights", type=Path, default=Path("weights/best_netG.pt"))
+    parser.add_argument("--duration", type=float, default=9.975)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-steps", type=int, default=1)
     parser.add_argument("--cfg-strength", type=float, default=4.5)
     args = parser.parse_args()

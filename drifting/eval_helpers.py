@@ -239,9 +239,16 @@ def run_checkpoint_evaluation(
             "MODEL_PATH": str(checkpoint_path),
             "OUTPUT_PATH": str(output_dir),
             "GT_CACHE": str(gt_cache),
+            "EVAL_TSV": os.environ.get("EVAL_TSV", "sets/test-audiocaps.tsv"),
+            "EVAL_NPZ_DIR": os.environ.get("EVAL_NPZ_DIR", "data/audiocaps/test-npz-t5-clap"),
+            "VAE_WEIGHTS": os.environ.get("VAE_WEIGHTS", "weights/v1-16.pth"),
+            "VOCODER_WEIGHTS": os.environ.get("VOCODER_WEIGHTS", "weights/best_netG.pt"),
+            "DURATION": os.environ.get("DURATION", "10"),
+            "SEED": os.environ.get("SEED", "42"),
             "NUM_STEPS": str(num_steps),
             "CFG_STRENGTH": str(cfg_strength),
             "USE_ROPE": "1" if use_rope else "0",
+            "DDP_TIMEOUT_MINUTES": os.environ.get("DDP_TIMEOUT_MINUTES", "180"),
         }
     )
     cmd = ["bash", "drifting/scripts/eval_drifting_checkpoint.sh"]

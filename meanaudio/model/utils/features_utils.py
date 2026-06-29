@@ -12,7 +12,6 @@ from transformers import T5EncoderModel, AutoTokenizer
 from meanaudio.ext.autoencoder import AutoEncoderModule
 from meanaudio.ext.mel_converter import get_mel_converter
 from meanaudio.model.utils.distributions import DiagonalGaussianDistribution
-import laion_clap
 import logging
 
 
@@ -63,6 +62,8 @@ class FeaturesUtils(nn.Module):
                 self.text_encoder = T5EncoderModel.from_pretrained('google/flan-t5-large').eval()
 
             elif encoder_name == 't5_clap' or encoder_name == 't5_clap_cat':
+                import laion_clap
+
                 self.tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-large')
                 self.text_encoder = T5EncoderModel.from_pretrained('google/flan-t5-large').eval()
                 self.laion_clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel='HTSAT-base').eval()
