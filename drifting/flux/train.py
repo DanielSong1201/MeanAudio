@@ -618,6 +618,7 @@ def main() -> None:
                 teacher.to("cpu")
                 move_optimizer_state(optimizer, torch.device("cpu"))
                 empty_cuda_cache()
+            progress.clear()
             try:
                 run_checkpoint_evaluation(
                     eval_entrypoint=Path("drifting/flux/test.py"),
@@ -631,6 +632,7 @@ def main() -> None:
                     use_rope=args.use_rope,
                     eval_metrics_path=eval_metrics_path,
                     logger=logger,
+                    stream_output=True,
                 )
             finally:
                 if args.eval_offload_train_state:
@@ -641,6 +643,7 @@ def main() -> None:
                     freeze_module(teacher)
                     student.train()
                     empty_cuda_cache()
+                progress.refresh()
 
         if distributed and should_eval:
             dist.barrier()

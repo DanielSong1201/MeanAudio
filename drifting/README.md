@@ -98,7 +98,6 @@ Required default assets:
 
 ```text
 weights/fluxaudio_s_full.pth
-weights/meanaudio_s_full.pth
 weights/v1-16.pth
 weights/best_netG.pt
 sets/latent_mean.pt
@@ -141,11 +140,10 @@ Check assets, data files, and latent statistics:
 bash tst/phase0_00_check_assets.sh
 ```
 
-Run the teacher and baseline evaluations:
+Run the teacher evaluation:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash tst/phase0_01_eval_fluxaudio_teacher.sh
-CUDA_VISIBLE_DEVICES=0 bash tst/phase0_02_eval_meanaudio_baseline.sh
 ```
 
 Or run all Phase-0 checks:
@@ -172,9 +170,7 @@ CUDA variant:
 DEVICE=cuda DTYPE=bfloat16 bash tst/phase2_00_check_tfd_loss.sh
 ```
 
-## 5. Experiment Routes
-
-### Flux Route
+## 5. Flux Route
 
 Location:
 
@@ -202,44 +198,12 @@ Default teacher feature layers:
 joint_3,fused_3,fused_7
 ```
 
-### Mean Route
-
-Location:
-
-```text
-drifting/mean/
-```
-
-Model relation:
-
-```text
-FluxAudio-S-Full teacher -> MeanAudio-S one-step student
-```
-
-This route keeps the MeanAudio/MeanFlow student while adding TFD and anchor
-regularization.
-
 ## 6. Drifting Tests
-
-Flux route:
 
 ```bash
 MODE=assets bash drifting/scripts/flux/test_flux.sh
 MODE=loss bash drifting/scripts/flux/test_flux.sh
 CUDA_VISIBLE_DEVICES=0 MODE=train-step BATCH_SIZE=2 bash drifting/scripts/flux/test_flux.sh
-```
-
-Mean route:
-
-```bash
-MODE=loss bash drifting/scripts/mean/test_mean.sh
-MODE=teacher bash drifting/scripts/mean/test_mean.sh
-```
-
-Compatibility route:
-
-```bash
-bash drifting/scripts/test_drifting.sh
 ```
 
 ## 7. Flux Training
@@ -308,32 +272,7 @@ LAMBDA_ANCHOR=1.0 \
 bash drifting/scripts/flux/train_flux_1x4090.sh
 ```
 
-## 8. Mean Training
-
-Single visible GPU:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 bash drifting/scripts/mean/train_mean_1x4090.sh
-```
-
-Debug run:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-EXP_ID=mean_debug \
-BATCH_SIZE=2 \
-ITERATIONS=100 \
-EVAL_INTERVAL=0 \
-bash drifting/scripts/mean/train_mean_1x4090.sh
-```
-
-Compatibility entrypoint:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 bash drifting/scripts/train_drifting_1x4090.sh
-```
-
-## 9. Auto Resume
+## 8. Auto Resume
 
 Training auto-resumes by default.
 
@@ -341,12 +280,6 @@ Flux route checks:
 
 ```text
 exps/drifting_flux/<exp_id>/
-```
-
-Mean route checks:
-
-```text
-exps/drifting/<exp_id>/
 ```
 
 If numeric checkpoints exist:
@@ -374,9 +307,7 @@ AUTO_RESUME=0 bash drifting/scripts/flux/train_flux_1x4090.sh
 `ITERATIONS` is the final target iteration. If `60000.pth` exists and
 `ITERATIONS=100000`, training runs from `60001` to `100000`.
 
-## 10. Logs and Outputs
-
-Flux route:
+## 9. Logs and Outputs
 
 ```text
 exps/drifting_flux/<exp_id>/train.log
@@ -388,18 +319,10 @@ exps/drifting_flux/<exp_id>/<exp_id>_last.pth
 exps/drifting_flux/<exp_id>/<exp_id>_ema_last.pth
 ```
 
-Mean route:
-
-```text
-exps/drifting/<exp_id>/train.log
-exps/drifting/<exp_id>/metrics.csv
-exps/drifting/<exp_id>/eval_metrics.csv
-```
-
 Training metrics are shown in the tqdm postfix. They are also written to
 `metrics.csv`.
 
-## 11. Training-Time Evaluation
+## 10. Training-Time Evaluation
 
 Default:
 
@@ -407,20 +330,8 @@ Default:
 EVAL_INTERVAL=10000
 ```
 
-Flux eval output:
-
 ```text
 exps/drifting_flux_eval/<exp_id>/it_00010000/
-  audio/
-  cache/
-  evaluate.log
-  eval_driver.log
-```
-
-Mean eval output:
-
-```text
-exps/drifting_eval/<exp_id>/it_00010000/
   audio/
   cache/
   evaluate.log
@@ -436,9 +347,7 @@ EVAL_INTERVAL=0 bash drifting/scripts/flux/train_flux_1x4090.sh
 By default, training-time eval uses EMA checkpoints. To evaluate raw weights
 during training, call the Python entrypoint with `--eval-raw`.
 
-## 12. Manual Evaluation
-
-Flux route:
+## 11. Manual Evaluation
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -462,7 +371,7 @@ USE_ROPE=1 \
 bash drifting/scripts/eval_drifting_checkpoint.sh
 ```
 
-## 13. Evaluate Latest Flux Checkpoints
+## 12. Evaluate Latest Flux Checkpoints
 
 Scan all experiment directories under `exps/drifting_flux/`, select the largest
 numeric checkpoint in each directory, and run the same full eval path used by
@@ -494,7 +403,7 @@ drifting/scripts/eval_drifting_checkpoint.sh
   -> av-benchmark/evaluate.py
 ```
 
-## 14. Sweeps
+## 13. Sweeps
 
 ### Original Three 200K Sweeps
 
@@ -571,7 +480,7 @@ flow=0.0 -> flux_sweep_tfd1_anchor1_flow00_200k
 
 The `flow=0.3` experiment ID intentionally stays unchanged.
 
-## 15. Troubleshooting
+## 14. Troubleshooting
 
 ### `python: command not found`
 
@@ -624,7 +533,7 @@ Use a new `EXP_ID`, remove old experiment files, or disable auto-resume:
 AUTO_RESUME=0 EXP_ID=your_exp bash drifting/scripts/flux/train_flux_1x4090.sh
 ```
 
-## 16. Minimal First Run
+## 15. Minimal First Run
 
 ```bash
 conda activate meanaudio

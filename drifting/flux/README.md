@@ -6,7 +6,9 @@ This experiment keeps both teacher and student in the `FluxAudio` architecture:
 FluxAudio-S-Full multi-step teacher -> FluxAudio-S one-step student
 ```
 
-It is closer to the original Teacher-Feature Drifting idea than the existing `drifting/train.py` path because the frozen teacher hidden states are produced by the same architecture family as the student.
+The frozen teacher hidden states are produced by the same architecture family
+as the student, so this route follows the Teacher-Feature Drifting design
+directly.
 
 ## Objective
 

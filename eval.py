@@ -109,7 +109,15 @@ def main():
                 audio_ids.append(row['id'])
                 text_prompts.append(row['caption'])
 
-    for k in tqdm(range(0, len(text_prompts)), desc='generate-audio', dynamic_ncols=True):
+    tqdm_position = int(os.environ.get('EVAL_TQDM_POSITION', os.environ.get('TQDM_POSITION', '0')))
+    tqdm_desc = os.environ.get('EVAL_TQDM_DESC', 'generate-audio')
+    tqdm_leave = os.environ.get('EVAL_TQDM_LEAVE', '0') == '1'
+    for k in tqdm(
+            range(0, len(text_prompts)),
+            desc=tqdm_desc,
+            dynamic_ncols=True,
+            position=tqdm_position,
+            leave=tqdm_leave):
         prompt = text_prompts[k]
         if args.use_meanflow:
             log.info(f'Prompt: {prompt}')

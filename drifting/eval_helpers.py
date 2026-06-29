@@ -141,6 +141,61 @@ def parse_evaluate_log(log_path: Path) -> dict[str, float]:
     return metrics
 
 
+def _first_visible_cuda_device() -> str:
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    first_device = visible_devices.split(",", 1)[0].strip()
+    return first_device or "0"
+
+
+def _run_eval_subprocess(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    driver_log: Path,
+    stream_output: bool,
+    stream_prefix: str,
+) -> int:
+    with driver_log.open("w") as log_file:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            bufsize=0,
+        )
+        assert process.stdout is not None
+        decoder = __import__("codecs").getincrementaldecoder("utf-8")(errors="replace")
+        at_line_start = True
+        while True:
+            chunk = process.stdout.read(1)
+            if not chunk:
+                break
+            text = decoder.decode(chunk)
+            if not text:
+                continue
+            log_file.write(text)
+            log_file.flush()
+            if stream_output:
+                for char in text:
+                    if at_line_start and char not in "\n\r":
+                        sys.stdout.write(stream_prefix)
+                        at_line_start = False
+                    sys.stdout.write(char)
+                    if char in "\n\r":
+                        at_line_start = True
+                sys.stdout.flush()
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            log_file.write(tail)
+            log_file.flush()
+            if stream_output:
+                if at_line_start:
+                    sys.stdout.write(stream_prefix)
+                sys.stdout.write(tail)
+                sys.stdout.flush()
+        return process.wait()
+
+
 def run_checkpoint_evaluation(
     *,
     eval_entrypoint: Path,
@@ -155,6 +210,9 @@ def run_checkpoint_evaluation(
     eval_metrics_path: Path,
     logger: logging.Logger,
     extra_args: Iterable[str] = (),
+    stream_output: bool = False,
+    stream_prefix: str | None = None,
+    eval_cuda_visible_devices: str | None = None,
 ) -> dict[str, float]:
     output_dir = output_root / exp_id / f"it_{iteration:08d}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -166,8 +224,16 @@ def run_checkpoint_evaluation(
     env = os.environ.copy()
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
         env.pop(key, None)
+    eval_cuda_visible_devices = eval_cuda_visible_devices or _first_visible_cuda_device()
+    if stream_prefix is None:
+        stream_prefix = f"[GPU{eval_cuda_visible_devices}] "
     env.update(
         {
+            "CUDA_VISIBLE_DEVICES": eval_cuda_visible_devices,
+            "PYTHONUNBUFFERED": "1",
+            "EVAL_TQDM_DESC": "generate-audio",
+            "EVAL_TQDM_POSITION": os.environ.get("TQDM_POSITION", "0"),
+            "EVAL_TQDM_LEAVE": "0",
             "PYTHON": sys.executable,
             "TEST_ENTRYPOINT": str(eval_entrypoint),
             "MODEL_PATH": str(checkpoint_path),
@@ -180,10 +246,21 @@ def run_checkpoint_evaluation(
     )
     cmd = ["bash", "drifting/scripts/eval_drifting_checkpoint.sh"]
 
-    logger.info("Running eval at it=%d with checkpoint=%s output=%s", iteration, checkpoint_path, output_dir)
-    with driver_log.open("w") as f:
-        result = subprocess.run(cmd, text=True, stdout=f, stderr=subprocess.STDOUT, env=env)
-    if result.returncode != 0:
+    logger.info(
+        "Running eval at it=%d with checkpoint=%s output=%s cuda_visible_devices=%s",
+        iteration,
+        checkpoint_path,
+        output_dir,
+        eval_cuda_visible_devices,
+    )
+    returncode = _run_eval_subprocess(
+        cmd,
+        env=env,
+        driver_log=driver_log,
+        stream_output=stream_output,
+        stream_prefix=stream_prefix,
+    )
+    if returncode != 0:
         tail = "\n".join(driver_log.read_text(errors="replace").splitlines()[-80:])
         logger.error("Eval failed at it=%d; driver log=%s\n%s", iteration, driver_log, tail)
         raise RuntimeError(f"Evaluation failed at iteration {iteration}; see {driver_log}")
