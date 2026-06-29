@@ -14,6 +14,10 @@ test_entrypoint="${TEST_ENTRYPOINT:-drifting/flux/test.py}"
 eval_script="${EVAL_SCRIPT:-drifting/scripts/eval_drifting_checkpoint.sh}"
 summary_csv="${SUMMARY_CSV:-${eval_root}/latest_eval_summary.csv}"
 
+info() {
+  printf '%s | INFO | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
 if [[ ! -d "${train_root}" ]]; then
   echo "Missing training root: ${train_root}" >&2
   exit 1
@@ -54,12 +58,20 @@ find_latest_raw_checkpoint() {
 found=0
 failed=0
 
+exp_dirs=()
 for exp_dir in "${train_root}"/*; do
   [[ -d "${exp_dir}" ]] || continue
+  exp_dirs+=("${exp_dir}")
+done
+total_exp_dirs="${#exp_dirs[@]}"
+current_exp_index=0
+
+for exp_dir in "${exp_dirs[@]}"; do
+  current_exp_index=$((current_exp_index + 1))
   exp_id="$(basename "${exp_dir}")"
   latest="$(find_latest_raw_checkpoint "${exp_dir}" "${exp_id}")"
   if [[ -z "${latest}" ]]; then
-    echo "Skipping ${exp_id}: no numeric checkpoint found in ${exp_dir}"
+    info "Skipping ${exp_id} (${current_exp_index}/${total_exp_dirs}): no numeric checkpoint found in ${exp_dir}"
     continue
   fi
 
@@ -76,22 +88,26 @@ for exp_dir in "${train_root}"/*; do
   mkdir -p "${output_dir}"
   driver_log="${output_dir}/eval_driver.log"
 
-  echo "================================================================"
-  echo "Evaluating latest Flux checkpoint"
-  echo "EXP_ID=${exp_id}"
-  echo "ITERATION=${iteration}"
-  echo "CHECKPOINT=${checkpoint}"
-  echo "OUTPUT_PATH=${output_dir}"
-  echo "GT_CACHE=${gt_cache}"
-  echo "NUM_STEPS=${num_steps}"
-  echo "CFG_STRENGTH=${cfg_strength}"
-  echo "USE_ROPE=${use_rope}"
-  echo "EVAL_USE_EMA=${use_ema}"
-  echo "EVAL_SCRIPT=${eval_script}"
-  echo "DRIVER_LOG=${driver_log}"
-  echo "================================================================"
+  {
+    echo "================================================================"
+    echo "Evaluating latest Flux checkpoint"
+    echo "EXP_ID=${exp_id}"
+    echo "ITERATION=${iteration}"
+    echo "CHECKPOINT=${checkpoint}"
+    echo "OUTPUT_PATH=${output_dir}"
+    echo "GT_CACHE=${gt_cache}"
+    echo "NUM_STEPS=${num_steps}"
+    echo "CFG_STRENGTH=${cfg_strength}"
+    echo "USE_ROPE=${use_rope}"
+    echo "EVAL_USE_EMA=${use_ema}"
+    echo "EVAL_SCRIPT=${eval_script}"
+    echo "DRIVER_LOG=${driver_log}"
+    echo "================================================================"
+  } | tee "${driver_log}"
 
-  if CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
+  info "Starting eval ${current_exp_index}/${total_exp_dirs}: ${exp_id} it=${iteration}" | tee -a "${driver_log}"
+  set +e
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
     TEST_ENTRYPOINT="${test_entrypoint}" \
     MODEL_PATH="${checkpoint}" \
     OUTPUT_PATH="${output_dir}" \
@@ -99,12 +115,15 @@ for exp_dir in "${train_root}"/*; do
     NUM_STEPS="${num_steps}" \
     CFG_STRENGTH="${cfg_strength}" \
     USE_ROPE="${use_rope}" \
-    bash "${eval_script}" >"${driver_log}" 2>&1; then
+    bash "${eval_script}" 2>&1 | tee -a "${driver_log}"
+  status="${PIPESTATUS[0]}"
+  set -e
+  if [[ "${status}" == "0" ]]; then
     printf '%s,%s,%s,%s,ok\n' "${exp_id}" "${iteration}" "${checkpoint}" "${output_dir}" >>"${summary_csv}"
-    echo "Eval completed: ${exp_id} it=${iteration}"
+    info "Eval completed: ${exp_id} it=${iteration}" | tee -a "${driver_log}"
   else
     printf '%s,%s,%s,%s,failed\n' "${exp_id}" "${iteration}" "${checkpoint}" "${output_dir}" >>"${summary_csv}"
-    echo "Eval failed: ${exp_id} it=${iteration}; see ${driver_log}" >&2
+    info "Eval failed: ${exp_id} it=${iteration}; see ${driver_log}" | tee -a "${driver_log}" >&2
     failed=1
   fi
 done

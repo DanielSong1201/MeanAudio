@@ -5,6 +5,10 @@ cd "$(dirname "$0")/../.."
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+info() {
+  printf '%s | INFO | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
 cmd=("${PYTHON:-python}" "${TEST_ENTRYPOINT:-drifting/test.py}" \
   --mode eval \
   --model-path "${MODEL_PATH:-exps/drifting/drifting_fluxaudio_s_1x4090/drifting_fluxaudio_s_1x4090_last.pth}" \
@@ -26,4 +30,7 @@ printf 'eval_config CFG_STRENGTH=%s\n' "${CFG_STRENGTH:-0.9}"
 printf 'eval_config USE_ROPE=%s\n' "${USE_ROPE:-1}"
 printf 'eval_config CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES}"
 
+info "Starting checkpoint evaluation"
+info "Step 1/2: generate audio and save files under ${OUTPUT_PATH:-exps/drifting_eval/drifting_fluxaudio_s_1x4090}/audio"
 "${cmd[@]}"
+info "Checkpoint evaluation finished"

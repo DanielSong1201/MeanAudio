@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,18 @@ import numpy as np
 import torch
 
 from meanaudio.model.teacher_feature_drifting import TeacherFeatureDriftingLoss
+
+log = logging.getLogger("drifting.eval")
+
+
+def setup_eval_logger() -> None:
+    if log.handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        stream=sys.stdout,
+    )
 
 
 def load_torch(path: Path, map_location: str | torch.device):
@@ -66,8 +79,13 @@ def check_teacher(args: argparse.Namespace, device: torch.device, dtype: torch.d
 
 
 def run_eval(args: argparse.Namespace) -> None:
+    setup_eval_logger()
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
+    log.info("Preparing MeanAudio eval")
+    log.info("model_path=%s", args.model_path)
+    log.info("output=%s", output)
+    log.info("num_steps=%s cfg_strength=%s use_rope=%s", args.num_steps, args.cfg_strength, args.use_rope)
     eval_cmd = [
         sys.executable,
         "eval.py",
@@ -91,7 +109,9 @@ def run_eval(args: argparse.Namespace) -> None:
     if args.use_rope:
         eval_cmd.append("--use_rope")
     eval_cmd.extend(["--use_meanflow", "--full_precision"])
+    log.info("Step 1/2: generating audio with eval.py")
     subprocess.run(eval_cmd, check=True)
+    log.info("Step 1/2 complete: audio_dir=%s", output / "audio")
 
     bench_cmd = [
         sys.executable,
@@ -108,8 +128,10 @@ def run_eval(args: argparse.Namespace) -> None:
         "--recompute_pred_cache",
         "--skip_video_related",
     ]
+    log.info("Step 2/2: computing metrics with av-benchmark/evaluate.py")
     with (output / "evaluate.log").open("w") as f:
         subprocess.run(bench_cmd, check=True, stdout=f, stderr=subprocess.STDOUT)
+    log.info("Step 2/2 complete: evaluate_log=%s", output / "evaluate.log")
     print(f"[ok] evaluation log written to {output / 'evaluate.log'}")
 
 

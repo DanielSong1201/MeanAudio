@@ -109,7 +109,7 @@ def main():
                 audio_ids.append(row['id'])
                 text_prompts.append(row['caption'])
 
-    for k in tqdm(range(0, len(text_prompts))):
+    for k in tqdm(range(0, len(text_prompts)), desc='generate-audio', dynamic_ncols=True):
         prompt = text_prompts[k]
         if args.use_meanflow:
             log.info(f'Prompt: {prompt}')
