@@ -112,6 +112,7 @@ def main():
     tqdm_position = int(os.environ.get('EVAL_TQDM_POSITION', os.environ.get('TQDM_POSITION', '0')))
     tqdm_desc = os.environ.get('EVAL_TQDM_DESC', 'generate-audio')
     tqdm_leave = os.environ.get('EVAL_TQDM_LEAVE', '0') == '1'
+    log_every_sample = os.environ.get('EVAL_LOG_EVERY_SAMPLE', '0') == '1'
     for k in tqdm(
             range(0, len(text_prompts)),
             desc=tqdm_desc,
@@ -120,8 +121,9 @@ def main():
             leave=tqdm_leave):
         prompt = text_prompts[k]
         if args.use_meanflow:
-            log.info(f'Prompt: {prompt}')
-            log.info(f'Negative prompt: {negative_prompt}')
+            if log_every_sample:
+                log.info(f'Prompt: {prompt}')
+                log.info(f'Negative prompt: {negative_prompt}')
             audios = generate_mf([prompt],
                                 negative_text=[negative_prompt],
                                 feature_utils=feature_utils,
@@ -132,13 +134,15 @@ def main():
             audio = audios.float().cpu()[0]
             save_paths = output_dir / f'{audio_ids[k]}.flac'
             torchaudio.save(save_paths, audio, seq_cfg.sampling_rate)
-            log.info(f'Audio saved to {save_paths}')
-            log.info('Memory usage: %.2f GB', torch.cuda.max_memory_allocated() / (2**30))
+            if log_every_sample:
+                log.info(f'Audio saved to {save_paths}')
+                log.info('Memory usage: %.2f GB', torch.cuda.max_memory_allocated() / (2**30))
 
         else:
             prompt = text_prompts[k]
-            log.info(f'Prompt: {prompt}')
-            log.info(f'Negative prompt: {negative_prompt}')
+            if log_every_sample:
+                log.info(f'Prompt: {prompt}')
+                log.info(f'Negative prompt: {negative_prompt}')
             audios = generate_fm([prompt],
                                 negative_text=[negative_prompt],
                                 feature_utils=feature_utils,
@@ -150,8 +154,9 @@ def main():
             
             save_paths = output_dir / f'{audio_ids[k]}.flac'
             torchaudio.save(save_paths, audio, seq_cfg.sampling_rate)
-            log.info(f'Audio saved to {save_paths}')
-            log.info('Memory usage: %.2f GB', torch.cuda.max_memory_allocated() / (2**30))
+            if log_every_sample:
+                log.info(f'Audio saved to {save_paths}')
+                log.info('Memory usage: %.2f GB', torch.cuda.max_memory_allocated() / (2**30))
 
     
 if __name__ == '__main__':

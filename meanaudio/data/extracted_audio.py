@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import Union, Optional
 
@@ -146,7 +147,8 @@ if __name__ == '__main__':
 
 
     def distributed_setup():
-        distributed.init_process_group(backend="nccl", timeout=timedelta(hours=2))
+        timeout_minutes = int(os.environ.get("DDP_TIMEOUT_MINUTES", "180"))
+        distributed.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_minutes))
         log.info(f'Initialized: local_rank={local_rank}, world_size={world_size}')
         return local_rank, world_size
 

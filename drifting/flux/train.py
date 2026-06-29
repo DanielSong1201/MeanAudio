@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +157,8 @@ def setup_distributed() -> tuple[bool, int, int, int]:
         return False, 0, 0, 1
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    dist.init_process_group(backend="nccl")
+    timeout_minutes = int(os.environ.get("DDP_TIMEOUT_MINUTES", "180"))
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_minutes))
     torch.cuda.set_device(local_rank)
     return True, rank, local_rank, world_size
 

@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-180}"
 NPROC_PER_NODE_VALUE="${NPROC_PER_NODE:-2}"
 
 EXP_ID_VALUE="${EXP_ID:-flux_drifting_s_2x4090}"
@@ -40,6 +41,7 @@ fi
 printf 'train_config EXP_ID=%s\n' "${EXP_ID_VALUE}"
 printf 'train_config GPU_COUNT=%s\n' "${NPROC_PER_NODE_VALUE}"
 printf 'train_config CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES}"
+printf 'train_config DDP_TIMEOUT_MINUTES=%s\n' "${DDP_TIMEOUT_MINUTES}"
 printf 'train_config TRAIN_SCRIPT=%s\n' "drifting/scripts/flux/train_flux_2x4090.sh"
 printf 'train_config TEACHER_WEIGHTS=%s\n' "${TEACHER_WEIGHTS_VALUE}"
 printf 'train_config STUDENT_INIT=%s\n' "${STUDENT_INIT_VALUE}"
