@@ -46,6 +46,7 @@ if [[ "${live_tqdm}" == "1" ]]; then
     TQDM_DESC="[GPU${gpu0}]" \
     LOG_PREFIX="[GPU${gpu0}]" \
     QUIET_CONSOLE_AFTER_TQDM=1 \
+    EVAL_TQDM_POSITION_OFFSET=3 \
     EXP_ID= \
     bash "${sweep0}"
   ) &
@@ -58,6 +59,7 @@ if [[ "${live_tqdm}" == "1" ]]; then
     TQDM_DESC="[GPU${gpu1}]" \
     LOG_PREFIX="[GPU${gpu1}]" \
     QUIET_CONSOLE_AFTER_TQDM=1 \
+    EVAL_TQDM_POSITION_OFFSET=3 \
     EXP_ID= \
     bash "${sweep1}"
   ) &
@@ -70,6 +72,7 @@ if [[ "${live_tqdm}" == "1" ]]; then
     TQDM_DESC="[GPU${gpu2}]" \
     LOG_PREFIX="[GPU${gpu2}]" \
     QUIET_CONSOLE_AFTER_TQDM=1 \
+    EVAL_TQDM_POSITION_OFFSET=3 \
     EXP_ID= \
     bash "${sweep2}"
   ) &

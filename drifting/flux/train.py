@@ -526,14 +526,15 @@ def main() -> None:
     if os.environ.get("QUIET_CONSOLE_AFTER_TQDM", "0") == "1":
         disable_console_logging(logger)
     progress = tqdm(
-        range(start_iteration, args.iterations + 1),
+        total=args.iterations,
+        initial=min(resume_iteration, args.iterations),
         desc=tqdm_desc,
         disable=not is_main,
         position=tqdm_position,
         leave=True,
         dynamic_ncols=True,
     )
-    for iteration in progress:
+    for iteration in range(start_iteration, args.iterations + 1):
         try:
             batch = next(data_iter)
         except StopIteration:
@@ -599,6 +600,8 @@ def main() -> None:
                 torch.save(ema.state_dict(), ema_weight_path)
                 logger.info("Saved EMA weights to %s", ema_weight_path)
 
+        progress.update(1)
+
         should_eval = args.eval_interval > 0 and iteration % args.eval_interval == 0
         if distributed and should_eval:
             dist.barrier()
@@ -649,6 +652,8 @@ def main() -> None:
 
         if distributed and should_eval:
             dist.barrier()
+
+    progress.close()
 
     if is_main:
         last_path = output_dir / f"{args.exp_id}_last.pth"

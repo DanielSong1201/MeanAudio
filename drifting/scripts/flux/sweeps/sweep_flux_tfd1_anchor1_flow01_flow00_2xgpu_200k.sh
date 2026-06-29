@@ -49,6 +49,7 @@ run_one() {
     TQDM_DESC="[GPU${gpus}]" \
     LOG_PREFIX="[GPU${gpus}]" \
     QUIET_CONSOLE_AFTER_TQDM=1 \
+    EVAL_TQDM_POSITION_OFFSET=2 \
     EXP_ID="${exp_id}" \
     ITERATIONS="${iterations}" \
     LEARNING_RATE="${learning_rate}" \

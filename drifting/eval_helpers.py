@@ -177,12 +177,18 @@ def _run_eval_subprocess(
             log_file.flush()
             if stream_output:
                 for char in text:
-                    if at_line_start and char not in "\n\r":
+                    if char == "\r":
+                        sys.stdout.write(char)
+                        at_line_start = False
+                        continue
+                    if char == "\n":
+                        sys.stdout.write(char)
+                        at_line_start = True
+                        continue
+                    if at_line_start:
                         sys.stdout.write(stream_prefix)
                         at_line_start = False
                     sys.stdout.write(char)
-                    if char in "\n\r":
-                        at_line_start = True
                 sys.stdout.flush()
         tail = decoder.decode(b"", final=True)
         if tail:
@@ -227,12 +233,17 @@ def run_checkpoint_evaluation(
     eval_cuda_visible_devices = eval_cuda_visible_devices or _first_visible_cuda_device()
     if stream_prefix is None:
         stream_prefix = f"[GPU{eval_cuda_visible_devices}] "
+    eval_tqdm_position = os.environ.get("EVAL_TQDM_POSITION")
+    if eval_tqdm_position is None:
+        train_tqdm_position = int(os.environ.get("TQDM_POSITION", "0"))
+        eval_position_offset = int(os.environ.get("EVAL_TQDM_POSITION_OFFSET", "1"))
+        eval_tqdm_position = str(train_tqdm_position + eval_position_offset)
     env.update(
         {
             "CUDA_VISIBLE_DEVICES": eval_cuda_visible_devices,
             "PYTHONUNBUFFERED": "1",
-            "EVAL_TQDM_DESC": "generate-audio",
-            "EVAL_TQDM_POSITION": os.environ.get("TQDM_POSITION", "0"),
+            "EVAL_TQDM_DESC": f"[GPU{eval_cuda_visible_devices}] eval",
+            "EVAL_TQDM_POSITION": eval_tqdm_position,
             "EVAL_TQDM_LEAVE": "0",
             "PYTHON": sys.executable,
             "TEST_ENTRYPOINT": str(eval_entrypoint),
