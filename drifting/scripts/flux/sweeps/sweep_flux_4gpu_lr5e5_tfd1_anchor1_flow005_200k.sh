@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../../../.."
+
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}" \
+EXP_ID="${EXP_ID:-flux_lr5e5_tfd1_anchor1_flow005_200k_4gpu}" \
+ITERATIONS="${ITERATIONS:-200000}" \
+LEARNING_RATE="${LEARNING_RATE:-5e-5}" \
+LAMBDA_FLOW="${LAMBDA_FLOW:-0.05}" \
+LAMBDA_TFD="${LAMBDA_TFD:-1.0}" \
+LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-1.0}" \
+FEATURE_NOISE="${FEATURE_NOISE:-0.1}" \
+EVAL_INTERVAL="${EVAL_INTERVAL:-10000}" \
+EMA_DECAY="${EMA_DECAY:-0.9999}" \
+bash "${TRAIN_SCRIPT:-drifting/scripts/flux/train_flux_4gpu_custom_loss.sh}"
