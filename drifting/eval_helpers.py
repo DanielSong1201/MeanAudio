@@ -260,6 +260,8 @@ def run_checkpoint_evaluation(
             "CFG_STRENGTH": str(cfg_strength),
             "USE_ROPE": "1" if use_rope else "0",
             "DDP_TIMEOUT_MINUTES": os.environ.get("DDP_TIMEOUT_MINUTES", "180"),
+            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
+            "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", "1"),
         }
     )
     cmd = ["bash", "drifting/scripts/eval_drifting_checkpoint.sh"]

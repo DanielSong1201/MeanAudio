@@ -3,6 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
+export DRIFTING_CKPT_DIR="${DRIFTING_CKPT_DIR:-drifting/ckpts}"
+bash drifting/scripts/prepare_hf_ckpts.sh
+export HF_HOME="${DRIFTING_CKPT_DIR}/huggingface"
+export HF_HUB_CACHE="${DRIFTING_CKPT_DIR}/huggingface/hub"
+export TRANSFORMERS_CACHE="${DRIFTING_CKPT_DIR}/huggingface/transformers"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 EXP_ID_VALUE="${EXP_ID:-flux_drifting_s_1x4090}"

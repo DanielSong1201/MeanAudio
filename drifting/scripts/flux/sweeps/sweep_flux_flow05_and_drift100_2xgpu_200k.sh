@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../../.."
 
+export EVAL_CONSOLE_OUTPUT="${EVAL_CONSOLE_OUTPUT:-0}"
+export EVAL_FAILURE_FATAL="${EVAL_FAILURE_FATAL:-0}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+
 train_script="${TRAIN_SCRIPT:-drifting/scripts/flux/train_flux_2x4090.sh}"
 flow05_gpus="${FLOW05_GPUS:-0,1}"
 drift_gpus="${DRIFT_GPUS:-2,3}"
@@ -12,6 +17,7 @@ learning_rate="${LEARNING_RATE:-5e-5}"
 feature_noise="${FEATURE_NOISE:-0.1}"
 eval_interval="${EVAL_INTERVAL:-10000}"
 ema_decay="${EMA_DECAY:-0.9999}"
+auto_resume="${AUTO_RESUME:-1}"
 live_tqdm="${LIVE_TQDM:-1}"
 log_root="${SWEEP_LAUNCH_LOG_ROOT:-exps/drifting_flux/sweep_launch_logs}"
 
@@ -51,6 +57,7 @@ run_one() {
   echo "FEATURE_NOISE=${feature_noise}"
   echo "EVAL_INTERVAL=${eval_interval}"
   echo "EMA_DECAY=${ema_decay}"
+  echo "AUTO_RESUME=${auto_resume}"
   echo "TRAIN_SCRIPT=${train_script}"
   echo "LOG=${log_path}"
   echo "LIVE_TQDM=${live_tqdm}"
@@ -73,6 +80,7 @@ run_one() {
     FEATURE_NOISE="${feature_noise}" \
     EVAL_INTERVAL="${eval_interval}" \
     EMA_DECAY="${ema_decay}" \
+    AUTO_RESUME="${auto_resume}" \
     bash "${train_script}"
   else
     CUDA_VISIBLE_DEVICES="${gpus}" \
@@ -86,6 +94,7 @@ run_one() {
     FEATURE_NOISE="${feature_noise}" \
     EVAL_INTERVAL="${eval_interval}" \
     EMA_DECAY="${ema_decay}" \
+    AUTO_RESUME="${auto_resume}" \
     bash "${train_script}" 2>&1 | awk -v prefix="[GPU${gpus}] " '{ print prefix $0; fflush() }' | tee "${log_path}"
   fi
 }

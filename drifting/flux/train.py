@@ -95,6 +95,20 @@ def disable_console_logging(logger: logging.Logger) -> None:
             handler.setLevel(logging.CRITICAL + 1)
 
 
+def suspend_console_logging(logger: logging.Logger) -> list[tuple[logging.Handler, int]]:
+    states: list[tuple[logging.Handler, int]] = []
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            states.append((handler, handler.level))
+            handler.setLevel(logging.CRITICAL + 1)
+    return states
+
+
+def restore_console_logging(states: list[tuple[logging.Handler, int]]) -> None:
+    for handler, level in states:
+        handler.setLevel(level)
+
+
 def append_metrics(path: Path, row: dict[str, Any]) -> None:
     write_header = not path.exists()
     with path.open("a", newline="") as f:
@@ -523,6 +537,8 @@ def main() -> None:
         )
     tqdm_position = int(os.environ.get("TQDM_POSITION", "0"))
     tqdm_desc = os.environ.get("TQDM_DESC", "flux-drifting-train")
+    eval_console_output = os.environ.get("EVAL_CONSOLE_OUTPUT", "1") == "1"
+    eval_failure_fatal = os.environ.get("EVAL_FAILURE_FATAL", "1") == "1"
     if os.environ.get("QUIET_CONSOLE_AFTER_TQDM", "0") == "1":
         disable_console_logging(logger)
     progress = tqdm(
@@ -607,47 +623,61 @@ def main() -> None:
             dist.barrier()
 
         if is_main and should_eval:
-            eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
-            torch.save(student.state_dict(), eval_weight_path)
-            logger.info("Saved eval raw weights to %s", eval_weight_path)
-            if ema is not None:
-                ema_eval_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
-                torch.save(ema.state_dict(), ema_eval_weight_path)
-                logger.info("Saved eval EMA weights to %s", ema_eval_weight_path)
-                if args.eval_use_ema:
-                    eval_weight_path = ema_eval_weight_path
-
-            if args.eval_offload_train_state:
-                logger.info("Offloading train state to CPU before eval.")
-                student.to("cpu")
-                teacher.to("cpu")
-                move_optimizer_state(optimizer, torch.device("cpu"))
-                empty_cuda_cache()
-            progress.clear()
+            console_states = [] if eval_console_output else suspend_console_logging(logger)
             try:
-                run_checkpoint_evaluation(
-                    eval_entrypoint=Path("drifting/flux/test.py"),
-                    iteration=iteration,
-                    checkpoint_path=eval_weight_path,
-                    output_root=args.eval_output_root,
-                    exp_id=args.exp_id,
-                    gt_cache=args.eval_gt_cache,
-                    num_steps=args.eval_num_steps,
-                    cfg_strength=args.eval_cfg_strength,
-                    use_rope=args.use_rope,
-                    eval_metrics_path=eval_metrics_path,
-                    logger=logger,
-                    stream_output=True,
-                )
-            finally:
+                eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
+                torch.save(student.state_dict(), eval_weight_path)
+                logger.info("Saved eval raw weights to %s", eval_weight_path)
+                if ema is not None:
+                    ema_eval_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
+                    torch.save(ema.state_dict(), ema_eval_weight_path)
+                    logger.info("Saved eval EMA weights to %s", ema_eval_weight_path)
+                    if args.eval_use_ema:
+                        eval_weight_path = ema_eval_weight_path
+
                 if args.eval_offload_train_state:
-                    logger.info("Restoring train state to %s after eval.", device)
-                    student.to(device)
-                    teacher.to(device)
-                    move_optimizer_state(optimizer, device)
-                    freeze_module(teacher)
-                    student.train()
+                    logger.info("Offloading train state to CPU before eval.")
+                    student.to("cpu")
+                    teacher.to("cpu")
+                    move_optimizer_state(optimizer, torch.device("cpu"))
                     empty_cuda_cache()
+                progress.clear()
+                try:
+                    try:
+                        run_checkpoint_evaluation(
+                            eval_entrypoint=Path("drifting/flux/test.py"),
+                            iteration=iteration,
+                            checkpoint_path=eval_weight_path,
+                            output_root=args.eval_output_root,
+                            exp_id=args.exp_id,
+                            gt_cache=args.eval_gt_cache,
+                            num_steps=args.eval_num_steps,
+                            cfg_strength=args.eval_cfg_strength,
+                            use_rope=args.use_rope,
+                            eval_metrics_path=eval_metrics_path,
+                            logger=logger,
+                            stream_output=eval_console_output,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Periodic eval failed at iteration %d; fatal=%s. "
+                            "See the eval driver log for details.",
+                            iteration,
+                            eval_failure_fatal,
+                        )
+                        if eval_failure_fatal:
+                            raise
+                finally:
+                    if args.eval_offload_train_state:
+                        logger.info("Restoring train state to %s after eval.", device)
+                        student.to(device)
+                        teacher.to(device)
+                        move_optimizer_state(optimizer, device)
+                        freeze_module(teacher)
+                        student.train()
+                        empty_cuda_cache()
+            finally:
+                restore_console_logging(console_states)
                 progress.refresh()
 
         if distributed and should_eval:

@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../../.."
 
+export EVAL_CONSOLE_OUTPUT="${EVAL_CONSOLE_OUTPUT:-0}"
+export EVAL_FAILURE_FATAL="${EVAL_FAILURE_FATAL:-0}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+
 train_script="${TRAIN_SCRIPT:-drifting/scripts/flux/train_flux_1x4090.sh}"
 gpu0="${GPU0:-0}"
 gpu1="${GPU1:-1}"

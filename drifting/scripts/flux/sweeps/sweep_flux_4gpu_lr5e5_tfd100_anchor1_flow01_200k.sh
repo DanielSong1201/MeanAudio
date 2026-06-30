@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../../.."
 
+export EVAL_CONSOLE_OUTPUT="${EVAL_CONSOLE_OUTPUT:-0}"
+export EVAL_FAILURE_FATAL="${EVAL_FAILURE_FATAL:-0}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}" \
 EXP_ID="${EXP_ID:-flux_lr5e5_tfd100_anchor1_flow01_200k_4gpu}" \

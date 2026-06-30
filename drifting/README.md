@@ -82,6 +82,50 @@ Training can start without this path, but full evaluation will fail.
 
 ### 3.1 Download Required Weights
 
+Every Flux training entrypoint now runs the following preparation step before
+starting Python or `torchrun`:
+
+```bash
+bash drifting/scripts/prepare_hf_ckpts.sh
+```
+
+Hugging Face assets are stored under:
+
+```text
+drifting/ckpts/
+  bert-base-uncased/
+  huggingface/
+  laion-clap/
+  meanaudio/
+  msclap/
+```
+
+The preparation script downloads only missing assets. Concurrent sweep tasks
+share a file lock, so only one process downloads while the others wait and then
+reuse the completed cache. Existing files in `weights/` are reused with hard
+links when possible. Compatibility links are created in `weights/` and
+`av-benchmark/weights/`.
+
+Test download plus strict offline loading:
+
+```bash
+bash drifting/scripts/test_local_hf_ckpts.sh
+```
+
+Test the existing cache without allowing downloads:
+
+```bash
+PREPARE_CKPTS=0 bash drifting/scripts/test_local_hf_ckpts.sh
+```
+
+Use a different cache root:
+
+```bash
+DRIFTING_CKPT_DIR=/path/to/shared/ckpts bash drifting/scripts/test_local_hf_ckpts.sh
+```
+
+The older Phase-0 helper remains available:
+
 The Phase-0 helper downloads the required public weights from Hugging Face:
 
 ```bash

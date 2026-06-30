@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../../.."
 
+export EVAL_CONSOLE_OUTPUT="${EVAL_CONSOLE_OUTPUT:-0}"
+export EVAL_FAILURE_FATAL="${EVAL_FAILURE_FATAL:-0}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+
 EXP_ID="${EXP_ID:-flux_sweep_tfd1_anchor1_flow03_200k}" \
 ITERATIONS="${ITERATIONS:-200000}" \
 LEARNING_RATE="${LEARNING_RATE:-5e-5}" \
