@@ -429,80 +429,31 @@ drifting/scripts/eval_drifting_checkpoint.sh
 
 ## 13. Sweeps
 
-### Original Three 200K Sweeps
-
-Run all sequentially:
-
-```bash
-bash drifting/scripts/flux/sweeps/run_all_flux_sweeps_200k.sh
-```
-
-Run individually:
-
-```bash
-bash drifting/scripts/flux/sweeps/sweep_flux_tfd1_anchor05_200k.sh
-bash drifting/scripts/flux/sweeps/sweep_flux_tfd1_anchor1_flow03_200k.sh
-bash drifting/scripts/flux/sweeps/sweep_flux_lr1e5_tfd1_anchor1_flow05_200k.sh
-```
-
-Configurations:
+The sweep directory contains three scripts:
 
 ```text
-flux_sweep_tfd1_anchor05_200k:
-  LR=5e-5, flow=1.0, tfd=1.0, anchor=0.5
-
-flux_sweep_tfd1_anchor1_flow03_200k:
-  LR=5e-5, flow=0.3, tfd=1.0, anchor=1.0
-
-flux_sweep_lr1e5_tfd1_anchor1_flow05_200k:
-  LR=1e-5, flow=0.5, tfd=1.0, anchor=1.0
+sweep_flux_4gpu_lr1e6_tfd1_anchor1_flow005_200k.sh
+sweep_flux_4gpu_lr1e6_tfd100_anchor1_flow01_200k.sh
+parallel_flux_2x2gpu_lr1e6_tfd1_tfd100_200k.sh
 ```
 
-### Parallel Three-Sweep Launcher
-
-Use three independent visible GPUs/processes:
+The first two run the retained experiments independently on four GPUs. The
+third runs them concurrently as two two-GPU DDP jobs:
 
 ```bash
-bash drifting/scripts/flux/sweeps/parallel_flux_sweeps_3x1gpu.sh
+bash drifting/scripts/flux/sweeps/parallel_flux_2x2gpu_lr1e6_tfd1_tfd100_200k.sh
 ```
 
-Defaults:
+Both experiments use `lr=1e-6`, 1000 warmup steps, and the same hybrid set of
+four prompt-matched positives. Their loss configurations are:
 
 ```text
-GPU0 -> tfd1_anchor05
-GPU1 -> tfd1_anchor1_flow03
-GPU2 -> lr1e5_tfd1_anchor1_flow05
+tfd=1,   anchor=1, flow=0.05
+tfd=100, anchor=1, flow=0.1
 ```
 
-Override device IDs:
-
-```bash
-GPU0=0 GPU1=2 GPU2=3 bash drifting/scripts/flux/sweeps/parallel_flux_sweeps_3x1gpu.sh
-```
-
-Live tqdm mode is enabled by default. To use prefixed line logs instead:
-
-```bash
-LIVE_TQDM=0 bash drifting/scripts/flux/sweeps/parallel_flux_sweeps_3x1gpu.sh
-```
-
-### Flow Ablation
-
-Run `flow=0.3/0.1/0.0` with `tfd=1.0` and `anchor=1.0`:
-
-```bash
-bash drifting/scripts/flux/sweeps/sweep_flux_tfd1_anchor1_flow_ablation_200k.sh
-```
-
-Experiment IDs:
-
-```text
-flow=0.3 -> flux_sweep_tfd1_anchor1_flow03_200k
-flow=0.1 -> flux_sweep_tfd1_anchor1_flow01_200k
-flow=0.0 -> flux_sweep_tfd1_anchor1_flow00_200k
-```
-
-The `flow=0.3` experiment ID intentionally stays unchanged.
+All distributed sweep entries set `DDP_TIMEOUT_MINUTES=180`, which configures
+the PyTorch NCCL process-group timeout to 180 minutes.
 
 ## 14. Troubleshooting
 
