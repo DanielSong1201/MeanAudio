@@ -8,8 +8,7 @@ bash drifting/scripts/prepare_hf_ckpts.sh
 export HF_HOME="${DRIFTING_CKPT_DIR}/huggingface"
 export HF_HUB_CACHE="${DRIFTING_CKPT_DIR}/huggingface/hub"
 export TRANSFORMERS_CACHE="${DRIFTING_CKPT_DIR}/huggingface/transformers"
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-180}"
@@ -77,11 +76,24 @@ TFD_TAG="$(format_loss_value "${LAMBDA_TFD_VALUE}")"
 ANCHOR_TAG="$(format_loss_value "${LAMBDA_ANCHOR_VALUE}")"
 ITERATIONS_TAG="$(format_iterations "${ITERATIONS_VALUE}")"
 EXP_ID_VALUE="${EXP_ID:-flux_tfd${TFD_TAG}_anchor${ANCHOR_TAG}_flow${FLOW_TAG}_${ITERATIONS_TAG}_4gpu}"
+OUTPUT_ROOT_VALUE="${OUTPUT_ROOT:-exps/drifting_flux}"
 
 EFFECTIVE_BATCH_SIZE_VALUE=$((BATCH_SIZE_VALUE * NPROC_PER_NODE_VALUE))
 AUTO_RESUME_ARGS=()
 if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
   AUTO_RESUME_ARGS=(--no-auto-resume)
+fi
+
+if ! command -v flock >/dev/null 2>&1; then
+  printf 'ERROR: flock is required to prevent duplicate training for one exp_id.\n' >&2
+  exit 1
+fi
+mkdir -p "${OUTPUT_ROOT_VALUE}/${EXP_ID_VALUE}"
+TRAIN_LOCK_PATH="${OUTPUT_ROOT_VALUE}/${EXP_ID_VALUE}/.train.lock"
+exec 9>"${TRAIN_LOCK_PATH}"
+if ! flock -n 9; then
+  printf 'ERROR: exp_id %s is already running (lock: %s).\n' "${EXP_ID_VALUE}" "${TRAIN_LOCK_PATH}" >&2
+  exit 1
 fi
 
 print_config() {
@@ -93,6 +105,8 @@ print_config() {
 }
 
 print_config "EXP_ID" "${EXP_ID_VALUE}"
+print_config "OUTPUT_ROOT" "${OUTPUT_ROOT_VALUE}"
+print_config "TRAIN_LOCK" "${TRAIN_LOCK_PATH}"
 print_config "GPU_COUNT" "${NPROC_PER_NODE_VALUE}"
 print_config "CUDA_VISIBLE_DEVICES" "${CUDA_VISIBLE_DEVICES}"
 print_config "DDP_TIMEOUT_MINUTES" "${DDP_TIMEOUT_MINUTES}"
@@ -134,6 +148,7 @@ QUIET_CONSOLE_AFTER_TQDM="${QUIET_CONSOLE_AFTER_TQDM_VALUE}" \
 EVAL_TQDM_POSITION_OFFSET="${EVAL_TQDM_POSITION_OFFSET_VALUE}" \
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" drifting/flux/train.py \
   --exp-id "${EXP_ID_VALUE}" \
+  --output-root "${OUTPUT_ROOT_VALUE}" \
   --teacher-weights "${TEACHER_WEIGHTS_VALUE}" \
   --student-init "${STUDENT_INIT_VALUE}" \
   --batch-size "${BATCH_SIZE_VALUE}" \

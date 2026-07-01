@@ -39,6 +39,41 @@ def load_torch(path: Path, map_location: str | torch.device):
         return torch.load(path, map_location=map_location)
 
 
+def load_training_state(path: Path, map_location: str | torch.device) -> dict[str, Any]:
+    try:
+        state = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        state = torch.load(path, map_location=map_location)
+    if not isinstance(state, dict) or "iteration" not in state:
+        raise ValueError(f"Invalid training state: {path}")
+    return state
+
+
+def save_training_state(
+    path: Path,
+    *,
+    iteration: int,
+    student: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    ema: ExponentialMovingAverage | None,
+    sampler_epoch: int,
+) -> None:
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    state = {
+        "version": 1,
+        "iteration": iteration,
+        "student": student.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "ema": None if ema is None else ema.state_dict(),
+        "sampler_epoch": sampler_epoch,
+    }
+    try:
+        torch.save(state, temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 class AudioCapsNpzDataset(Dataset):
     def __init__(self, *, tsv_path: Path, npz_dir: Path) -> None:
         self.npz_dir = npz_dir
@@ -383,21 +418,57 @@ def main() -> None:
 
     resume_iteration = 0
     resume_path: Path | None = None
+    resume_mode: str | None = None
+    training_state_path = output_dir / f"{args.exp_id}_train_state_last.pth"
     if args.auto_resume:
-        latest = None
+        latest: tuple[int, Path, str] | None = None
         if is_main:
-            latest = find_latest_weight_checkpoint(output_dir, args.exp_id)
+            latest_weights = find_latest_weight_checkpoint(output_dir, args.exp_id)
+            if training_state_path.exists():
+                try:
+                    state_metadata = load_training_state(training_state_path, "cpu")
+                    state_iteration = int(state_metadata["iteration"])
+                    del state_metadata
+                    if latest_weights is None or state_iteration >= latest_weights[0]:
+                        latest = (state_iteration, training_state_path, "full")
+                    else:
+                        logger.warning(
+                            "Training state at iteration %d is older than weight checkpoint %d; "
+                            "falling back to the newer weights-only checkpoint.",
+                            state_iteration,
+                            latest_weights[0],
+                        )
+                except Exception:
+                    logger.exception(
+                        "Could not read training state %s; falling back to a weights-only checkpoint.",
+                        training_state_path,
+                    )
+            if latest is None and latest_weights is not None:
+                latest = (latest_weights[0], latest_weights[1], "weights")
         if distributed:
-            payload: list[tuple[int, str] | None] = [
-                None if latest is None else (latest[0], str(latest[1]))
+            payload: list[tuple[int, str, str] | None] = [
+                None if latest is None else (latest[0], str(latest[1]), latest[2])
             ]
             dist.broadcast_object_list(payload, src=0)
             latest_payload = payload[0]
-            latest = None if latest_payload is None else (latest_payload[0], Path(latest_payload[1]))
+            latest = (
+                None
+                if latest_payload is None
+                else (latest_payload[0], Path(latest_payload[1]), latest_payload[2])
+            )
         if latest is not None:
-            resume_iteration, resume_path = latest
-            logger.info("Auto-resume found checkpoint: it=%d path=%s", resume_iteration, resume_path)
-            logger.info("Optimizer state is initialized fresh because existing checkpoints are weights-only.")
+            resume_iteration, resume_path, resume_mode = latest
+            logger.info(
+                "Auto-resume found checkpoint: it=%d mode=%s path=%s",
+                resume_iteration,
+                resume_mode,
+                resume_path,
+            )
+            if resume_mode == "weights":
+                logger.warning(
+                    "Optimizer state is initialized fresh because this legacy checkpoint is weights-only. "
+                    "Future checkpoints will include full resumable training state."
+                )
         else:
             logger.info("Auto-resume found no numeric checkpoint in %s; starting from student init.", output_dir)
     else:
@@ -446,9 +517,15 @@ def main() -> None:
         empty_text_c=empty_text_c,
         use_rope=args.use_rope,
     )
+    resume_state: dict[str, Any] | None = None
     if resume_path is not None:
-        logger.info("Loading resumed FluxAudio student weights: %s", resume_path)
-        student.load_weights(load_torch(resume_path, device))
+        if resume_mode == "full":
+            logger.info("Loading full resumed FluxAudio training state: %s", resume_path)
+            resume_state = load_training_state(resume_path, "cpu")
+            student.load_state_dict(resume_state["student"], strict=True)
+        else:
+            logger.info("Loading resumed FluxAudio student weights: %s", resume_path)
+            student.load_weights(load_torch(resume_path, device))
     logger.info("Loading frozen FluxAudio teacher: %s", args.teacher_weights)
     teacher = build_flux_model(
         weights_path=args.teacher_weights,
@@ -464,7 +541,10 @@ def main() -> None:
     ema_device = torch.device(args.ema_device if args.ema_device == "cpu" else device)
     ema = ExponentialMovingAverage(student, decay=args.ema_decay, device=ema_device) if args.ema else None
     if ema is not None:
-        if resume_path is not None:
+        if resume_state is not None and resume_state.get("ema") is not None:
+            logger.info("Restoring EMA state from full training checkpoint.")
+            ema.load_state_dict(resume_state["ema"])
+        elif resume_path is not None:
             ema_resume_path = output_dir / f"{args.exp_id}_{resume_iteration}_ema.pth"
             if ema_resume_path.exists():
                 logger.info("Loading resumed EMA weights: %s", ema_resume_path)
@@ -481,6 +561,10 @@ def main() -> None:
         )
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    if resume_state is not None:
+        optimizer.load_state_dict(resume_state["optimizer"])
+        move_optimizer_state(optimizer, device)
+        logger.info("Restored optimizer state from iteration %d.", resume_iteration)
     criterion = TeacherFeatureDriftingLoss(
         radii=parse_radii(args.radii),
         pool_tokens=args.pool_tokens,
@@ -508,7 +592,8 @@ def main() -> None:
             find_unused_parameters=False,
         )
 
-    sampler_epoch = 0
+    sampler_epoch = int(resume_state.get("sampler_epoch", 0)) if resume_state is not None else 0
+    resume_state = None
     if sampler is not None:
         sampler.set_epoch(sampler_epoch)
     data_iter = iter(loader)
@@ -538,7 +623,7 @@ def main() -> None:
     tqdm_position = int(os.environ.get("TQDM_POSITION", "0"))
     tqdm_desc = os.environ.get("TQDM_DESC", "flux-drifting-train")
     eval_console_output = os.environ.get("EVAL_CONSOLE_OUTPUT", "1") == "1"
-    eval_failure_fatal = os.environ.get("EVAL_FAILURE_FATAL", "1") == "1"
+    eval_failure_fatal = os.environ.get("EVAL_FAILURE_FATAL", "0") == "1"
     if os.environ.get("QUIET_CONSOLE_AFTER_TQDM", "0") == "1":
         disable_console_logging(logger)
     progress = tqdm(
@@ -550,6 +635,7 @@ def main() -> None:
         leave=True,
         dynamic_ncols=True,
     )
+    last_completed_iteration = resume_iteration
     for iteration in range(start_iteration, args.iterations + 1):
         try:
             batch = next(data_iter)
@@ -574,6 +660,7 @@ def main() -> None:
         optimizer.step()
         if ema is not None and iteration >= args.ema_start and iteration % args.ema_update_interval == 0:
             ema.update(student)
+        last_completed_iteration = iteration
 
         should_log = iteration == 1 or iteration % args.log_interval == 0
         if should_log:
@@ -615,6 +702,15 @@ def main() -> None:
                 ema_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
                 torch.save(ema.state_dict(), ema_weight_path)
                 logger.info("Saved EMA weights to %s", ema_weight_path)
+            save_training_state(
+                training_state_path,
+                iteration=iteration,
+                student=student,
+                optimizer=optimizer,
+                ema=ema,
+                sampler_epoch=sampler_epoch,
+            )
+            logger.info("Saved resumable training state to %s", training_state_path)
 
         progress.update(1)
 
@@ -693,6 +789,15 @@ def main() -> None:
             ema_last_path = output_dir / f"{args.exp_id}_ema_last.pth"
             torch.save(ema.state_dict(), ema_last_path)
             logger.info("Saved final EMA weights to %s", ema_last_path)
+        save_training_state(
+            training_state_path,
+            iteration=last_completed_iteration,
+            student=student,
+            optimizer=optimizer,
+            ema=ema,
+            sampler_epoch=sampler_epoch,
+        )
+        logger.info("Saved final resumable training state to %s", training_state_path)
         logger.info("FluxAudio drifting training completed.")
     cleanup_distributed(distributed)
 

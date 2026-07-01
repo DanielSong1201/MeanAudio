@@ -8,12 +8,12 @@ bash drifting/scripts/prepare_hf_ckpts.sh
 export HF_HOME="${DRIFTING_CKPT_DIR}/huggingface"
 export HF_HUB_CACHE="${DRIFTING_CKPT_DIR}/huggingface/hub"
 export TRANSFORMERS_CACHE="${DRIFTING_CKPT_DIR}/huggingface/transformers"
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 EXP_ID_VALUE="${EXP_ID:-flux_drifting_s_1x4090}"
+OUTPUT_ROOT_VALUE="${OUTPUT_ROOT:-exps/drifting_flux}"
 TEACHER_WEIGHTS_VALUE="${TEACHER_WEIGHTS:-weights/fluxaudio_s_full.pth}"
 STUDENT_INIT_VALUE="${STUDENT_INIT:-weights/fluxaudio_s_full.pth}"
 BATCH_SIZE_VALUE="${BATCH_SIZE:-4}"
@@ -44,6 +44,18 @@ if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
   AUTO_RESUME_ARGS=(--no-auto-resume)
 fi
 
+if ! command -v flock >/dev/null 2>&1; then
+  printf 'ERROR: flock is required to prevent duplicate training for one exp_id.\n' >&2
+  exit 1
+fi
+mkdir -p "${OUTPUT_ROOT_VALUE}/${EXP_ID_VALUE}"
+TRAIN_LOCK_PATH="${OUTPUT_ROOT_VALUE}/${EXP_ID_VALUE}/.train.lock"
+exec 9>"${TRAIN_LOCK_PATH}"
+if ! flock -n 9; then
+  printf 'ERROR: exp_id %s is already running (lock: %s).\n' "${EXP_ID_VALUE}" "${TRAIN_LOCK_PATH}" >&2
+  exit 1
+fi
+
 print_config() {
   if [[ -n "${LOG_PREFIX_VALUE}" ]]; then
     printf '%s train_config %s=%s\n' "${LOG_PREFIX_VALUE}" "$1" "$2"
@@ -53,6 +65,8 @@ print_config() {
 }
 
 print_config "EXP_ID" "${EXP_ID_VALUE}"
+print_config "OUTPUT_ROOT" "${OUTPUT_ROOT_VALUE}"
+print_config "TRAIN_LOCK" "${TRAIN_LOCK_PATH}"
 print_config "GPU_COUNT" "1"
 print_config "CUDA_VISIBLE_DEVICES" "${CUDA_VISIBLE_DEVICES}"
 print_config "TRAIN_SCRIPT" "drifting/scripts/flux/train_flux_1x4090.sh"
@@ -86,6 +100,7 @@ print_config "AMP" "1"
 
 python drifting/flux/train.py \
   --exp-id "${EXP_ID_VALUE}" \
+  --output-root "${OUTPUT_ROOT_VALUE}" \
   --teacher-weights "${TEACHER_WEIGHTS_VALUE}" \
   --student-init "${STUDENT_INIT_VALUE}" \
   --batch-size "${BATCH_SIZE_VALUE}" \

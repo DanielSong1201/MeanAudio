@@ -5,8 +5,6 @@ cd "$(dirname "$0")/../../../.."
 
 export EVAL_CONSOLE_OUTPUT="${EVAL_CONSOLE_OUTPUT:-0}"
 export EVAL_FAILURE_FATAL="${EVAL_FAILURE_FATAL:-0}"
-export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
-export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 
 sweeps=(
   "drifting/scripts/flux/sweeps/sweep_flux_tfd1_anchor05_200k.sh"

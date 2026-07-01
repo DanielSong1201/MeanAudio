@@ -106,11 +106,15 @@ reuse the completed cache. Existing files in `weights/` are reused with hard
 links when possible. Compatibility links are created in `weights/` and
 `av-benchmark/weights/`.
 
-Test download plus strict offline loading:
+Optional cache diagnostic with strict offline loading:
 
 ```bash
 bash drifting/scripts/test_local_hf_ckpts.sh
 ```
+
+This diagnostic does not control training-time evaluation. Flux training
+explicitly clears `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE`, so evaluation
+can fetch missing model files from Hugging Face.
 
 Test the existing cache without allowing downloads:
 
@@ -326,21 +330,38 @@ Flux route checks:
 exps/drifting_flux/<exp_id>/
 ```
 
-If numeric checkpoints exist:
+The preferred resume file is:
+
+```text
+<exp_id>_train_state_last.pth
+```
+
+It contains the student, EMA, AdamW optimizer, iteration, and sampler epoch.
+It is atomically replaced at each save interval. Numeric checkpoints remain
+available for evaluation:
 
 ```text
 <exp_id>_<iteration>.pth
 ```
 
-the trainer loads the largest iteration and continues from `iteration + 1`.
-If the matching EMA checkpoint exists, it is loaded too:
+For experiments created before full training-state checkpoints were added, the
+trainer falls back to the largest numeric checkpoint and matching EMA:
 
 ```text
 <exp_id>_<iteration>_ema.pth
 ```
 
-These checkpoints are weights-only. Optimizer state is initialized fresh after
-resume.
+That first legacy resume initializes the optimizer fresh. After the next save,
+future resumes restore the complete optimizer state.
+
+Each base training script also holds:
+
+```text
+exps/drifting_flux/<exp_id>/.train.lock
+```
+
+A second process using the same `EXP_ID` exits instead of writing into the same
+checkpoint and metrics files.
 
 Force a fresh run:
 
@@ -361,6 +382,7 @@ exps/drifting_flux/<exp_id>/<exp_id>_<iteration>.pth
 exps/drifting_flux/<exp_id>/<exp_id>_<iteration>_ema.pth
 exps/drifting_flux/<exp_id>/<exp_id>_last.pth
 exps/drifting_flux/<exp_id>/<exp_id>_ema_last.pth
+exps/drifting_flux/<exp_id>/<exp_id>_train_state_last.pth
 ```
 
 Training metrics are shown in the tqdm postfix. They are also written to
@@ -390,6 +412,12 @@ EVAL_INTERVAL=0 bash drifting/scripts/flux/train_flux_1x4090.sh
 
 By default, training-time eval uses EMA checkpoints. To evaluate raw weights
 during training, call the Python entrypoint with `--eval-raw`.
+
+Training-time evaluation uses online Hugging Face resolution and reuses
+anything already present in `drifting/ckpts/huggingface`. An evaluation failure,
+including a Hugging Face connection failure, is logged under the iteration's
+`eval_driver.log` and does not terminate the training loop. Set
+`EVAL_FAILURE_FATAL=1` only when an eval failure should stop training.
 
 ## 11. Manual Evaluation
 

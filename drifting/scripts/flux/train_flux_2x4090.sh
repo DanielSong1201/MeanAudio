@@ -8,14 +8,14 @@ bash drifting/scripts/prepare_hf_ckpts.sh
 export HF_HOME="${DRIFTING_CKPT_DIR}/huggingface"
 export HF_HUB_CACHE="${DRIFTING_CKPT_DIR}/huggingface/hub"
 export TRANSFORMERS_CACHE="${DRIFTING_CKPT_DIR}/huggingface/transformers"
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-180}"
 NPROC_PER_NODE_VALUE="${NPROC_PER_NODE:-2}"
 
 EXP_ID_VALUE="${EXP_ID:-flux_drifting_s_2x4090}"
+OUTPUT_ROOT_VALUE="${OUTPUT_ROOT:-exps/drifting_flux}"
 TEACHER_WEIGHTS_VALUE="${TEACHER_WEIGHTS:-weights/fluxaudio_s_full.pth}"
 STUDENT_INIT_VALUE="${STUDENT_INIT:-weights/fluxaudio_s_full.pth}"
 BATCH_SIZE_VALUE="${BATCH_SIZE:-4}"
@@ -46,7 +46,21 @@ if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
   AUTO_RESUME_ARGS=(--no-auto-resume)
 fi
 
+if ! command -v flock >/dev/null 2>&1; then
+  printf 'ERROR: flock is required to prevent duplicate training for one exp_id.\n' >&2
+  exit 1
+fi
+mkdir -p "${OUTPUT_ROOT_VALUE}/${EXP_ID_VALUE}"
+TRAIN_LOCK_PATH="${OUTPUT_ROOT_VALUE}/${EXP_ID_VALUE}/.train.lock"
+exec 9>"${TRAIN_LOCK_PATH}"
+if ! flock -n 9; then
+  printf 'ERROR: exp_id %s is already running (lock: %s).\n' "${EXP_ID_VALUE}" "${TRAIN_LOCK_PATH}" >&2
+  exit 1
+fi
+
 printf 'train_config EXP_ID=%s\n' "${EXP_ID_VALUE}"
+printf 'train_config OUTPUT_ROOT=%s\n' "${OUTPUT_ROOT_VALUE}"
+printf 'train_config TRAIN_LOCK=%s\n' "${TRAIN_LOCK_PATH}"
 printf 'train_config GPU_COUNT=%s\n' "${NPROC_PER_NODE_VALUE}"
 printf 'train_config CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES}"
 printf 'train_config DDP_TIMEOUT_MINUTES=%s\n' "${DDP_TIMEOUT_MINUTES}"
@@ -81,6 +95,7 @@ printf 'train_config AMP=%s\n' "1"
 
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" drifting/flux/train.py \
   --exp-id "${EXP_ID_VALUE}" \
+  --output-root "${OUTPUT_ROOT_VALUE}" \
   --teacher-weights "${TEACHER_WEIGHTS_VALUE}" \
   --student-init "${STUDENT_INIT_VALUE}" \
   --batch-size "${BATCH_SIZE_VALUE}" \
