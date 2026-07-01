@@ -141,7 +141,9 @@ weights instead.
 Periodic eval is terminal-silent: all shell, generation, and benchmark output
 is redirected to `eval_driver.log` or `evaluate.log`. The training tqdm bars
 remain in place while eval runs and resume naturally afterward; eval time is
-excluded from the displayed training speed and ETA.
+excluded from the displayed training speed and ETA. To free eval memory safely,
+rank0 moves only the frozen teacher and optimizer state to CPU; the trainable
+student and its DDP reducer remain on CUDA and are never rebuilt across eval.
 
 ## Train
 
@@ -307,6 +309,42 @@ bash drifting/scripts/flux/sweeps/parallel_flux_2x2gpu_lr1e6_tfd1_tfd100_200k.sh
 All three scripts export `DDP_TIMEOUT_MINUTES=180`. This value is passed to
 `torch.distributed.init_process_group(..., timeout=timedelta(minutes=180))`
 for the NCCL process group.
+
+## Eval-resume smoke test
+
+Use an existing iteration-10000 checkpoint to exercise the complete
+`19999 -> 20000 eval -> 20001..20100` control flow without modifying the
+source experiment:
+
+```bash
+bash drifting/scripts/flux/test_eval_resume_2gpu.sh
+```
+
+The script copies the source raw/EMA checkpoints into a timestamped test
+experiment under `exps/drifting_flux_resume_smoke/`, renames the copy to
+iteration 19999, runs a two-GPU job through iteration 20100, and writes eval
+artifacts under `exps/drifting_flux_eval_resume_smoke/`. It fails unless
+`metrics.csv` contains iterations 20000 through 20100, the train log contains
+`TRAIN_RESUME_AFTER_EVAL iteration=20000`, and both eval logs exist.
+Only weight and EMA files are copied, so the smoke test intentionally starts
+with a fresh optimizer and must not be interpreted as a valid continuation
+experiment.
+
+The default source is the two-GPU `tfd1` experiment. Select the other retained
+experiment with:
+
+```bash
+TEST_VARIANT=tfd100 bash drifting/scripts/flux/test_eval_resume_2gpu.sh
+```
+
+For any other source name or location:
+
+```bash
+SOURCE_EXP_ID=<existing-exp-id> \
+SOURCE_OUTPUT_ROOT=<training-output-root> \
+SOURCE_ITERATION=10000 \
+bash drifting/scripts/flux/test_eval_resume_2gpu.sh
+```
 
 ## Tests
 

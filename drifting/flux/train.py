@@ -603,7 +603,15 @@ def main() -> None:
     parser.add_argument("--eval-gt-cache", type=Path, default=Path("data/audiocaps/test-features"))
     parser.add_argument("--eval-num-steps", type=int, default=1)
     parser.add_argument("--eval-cfg-strength", type=float, default=4.5)
-    parser.add_argument("--no-eval-offload-train-state", dest="eval_offload_train_state", action="store_false")
+    parser.add_argument(
+        "--no-eval-offload-train-state",
+        dest="eval_offload_train_state",
+        action="store_false",
+        help=(
+            "Keep the frozen teacher and optimizer state on CUDA during periodic eval. "
+            "The trainable DDP student always remains on CUDA."
+        ),
+    )
     parser.add_argument("--disable-ema", dest="ema", action="store_false")
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--ema-start", type=int, default=0)
@@ -923,6 +931,7 @@ def main() -> None:
         if ema is not None and iteration >= args.ema_start and iteration % args.ema_update_interval == 0:
             ema.update(student)
         last_completed_iteration = iteration
+        progress.update(1)
 
         should_log = iteration == 1 or iteration % args.log_interval == 0
         if should_log:
@@ -974,15 +983,15 @@ def main() -> None:
             )
             logger.info("Saved resumable training state to %s", training_state_path)
 
-        progress.update(1)
-
         should_eval = args.eval_interval > 0 and iteration % args.eval_interval == 0
         if distributed and should_eval:
             dist.barrier()
 
-        if is_main and should_eval:
-            console_states = suspend_console_logging(logger)
-            try:
+        if should_eval:
+            console_states = suspend_console_logging(logger) if is_main else []
+            eval_error: Exception | None = None
+
+            if is_main:
                 eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
                 torch.save(student.state_dict(), eval_weight_path)
                 logger.info("Saved eval raw weights to %s", eval_weight_path)
@@ -993,52 +1002,76 @@ def main() -> None:
                     if args.eval_use_ema:
                         eval_weight_path = ema_eval_weight_path
 
-                if args.eval_offload_train_state:
-                    logger.info("Offloading train state to CPU before eval.")
-                    student.to("cpu")
+            if distributed:
+                dist.barrier()
+
+            if args.eval_offload_train_state:
+                if is_main:
+                    logger.info(
+                        "Offloading rank0 frozen teacher and optimizer state to CPU before eval; "
+                        "the DDP student remains on CUDA."
+                    )
+                    optimizer.zero_grad(set_to_none=True)
                     teacher.to("cpu")
                     move_optimizer_state(optimizer, torch.device("cpu"))
-                    empty_cuda_cache()
+                empty_cuda_cache()
+
+            if distributed:
+                dist.barrier()
+
+            if is_main:
                 try:
-                    try:
-                        run_checkpoint_evaluation(
-                            eval_entrypoint=Path("drifting/flux/test.py"),
-                            iteration=iteration,
-                            checkpoint_path=eval_weight_path,
-                            output_root=args.eval_output_root,
-                            exp_id=args.exp_id,
-                            gt_cache=args.eval_gt_cache,
-                            num_steps=args.eval_num_steps,
-                            cfg_strength=args.eval_cfg_strength,
-                            use_rope=args.use_rope,
-                            eval_metrics_path=eval_metrics_path,
-                            logger=logger,
-                            stream_output=False,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Periodic eval failed at iteration %d; fatal=%s. "
-                            "See the eval driver log for details.",
-                            iteration,
-                            eval_failure_fatal,
-                        )
-                        if eval_failure_fatal:
-                            raise
-                finally:
-                    if args.eval_offload_train_state:
-                        logger.info("Restoring train state to %s after eval.", device)
-                        student.to(device)
-                        teacher.to(device)
-                        move_optimizer_state(optimizer, device)
-                        freeze_module(teacher)
-                        student.train()
-                        empty_cuda_cache()
-            finally:
+                    run_checkpoint_evaluation(
+                        eval_entrypoint=Path("drifting/flux/test.py"),
+                        iteration=iteration,
+                        checkpoint_path=eval_weight_path,
+                        output_root=args.eval_output_root,
+                        exp_id=args.exp_id,
+                        gt_cache=args.eval_gt_cache,
+                        num_steps=args.eval_num_steps,
+                        cfg_strength=args.eval_cfg_strength,
+                        use_rope=args.use_rope,
+                        eval_metrics_path=eval_metrics_path,
+                        logger=logger,
+                        stream_output=False,
+                    )
+                except Exception as error:
+                    eval_error = error
+                    logger.exception(
+                        "Periodic eval failed at iteration %d; fatal=%s. "
+                        "See the eval driver log for details.",
+                        iteration,
+                        eval_failure_fatal,
+                    )
+
+            if distributed:
+                dist.barrier()
+
+            if args.eval_offload_train_state:
+                if is_main:
+                    logger.info(
+                        "Restoring rank0 frozen teacher and optimizer state to %s after eval.",
+                        device,
+                    )
+                    teacher.to(device)
+                    move_optimizer_state(optimizer, device)
+                    freeze_module(teacher)
+                    student.train()
+                    empty_cuda_cache()
+                if distributed:
+                    dist.barrier()
+
+            if is_main:
+                logger.info(
+                    "TRAIN_RESUME_AFTER_EVAL iteration=%d student_device=%s teacher_device=%s",
+                    iteration,
+                    student.device,
+                    teacher.device,
+                )
                 restore_console_logging(console_states)
                 progress.unpause()
-
-        if distributed and should_eval:
-            dist.barrier()
+                if eval_error is not None and eval_failure_fatal:
+                    raise eval_error
 
     progress.close()
 
