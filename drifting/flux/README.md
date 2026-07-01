@@ -26,6 +26,22 @@ L = lambda_flow * L_one_step_flow
   + lambda_anchor * L_anchor_margin
 ```
 
+For conditional TFD, use multiple samples for each caption:
+
+```text
+condition batch:          B captions
+samples per condition:    K student samples and K positive latent samples
+teacher features:         B x K x tokens x hidden_dim
+```
+
+Drifting and anchor neighborhoods are computed independently inside each
+caption group, then averaged across captions. This prevents unrelated captions
+in the same data-loader batch from becoming each other's positive or repulsion
+samples. When `K > 1`, each positive is an independent sample from the
+caption's stored VAE posterior. `BATCH_SIZE=1` and
+`SAMPLES_PER_CONDITION=4` keep four model samples per GPU while matching the
+paper's four-samples-per-condition setup.
+
 where:
 
 - `L_one_step_flow` regresses the student flow to `x0 - x_real`.
@@ -166,6 +182,42 @@ BATCH_SIZE=2 \
 ITERATIONS=100 \
 LOG_INTERVAL=10 \
 bash drifting/scripts/flux/train_flux_1x4090.sh
+```
+
+The learning rate uses a linear warmup over the first 500 global iterations by
+default. Both settings can be overridden:
+
+```bash
+LR_WARMUP_STEPS=500 \
+SAMPLES_PER_CONDITION=4 \
+BATCH_SIZE=1 \
+bash drifting/scripts/flux/train_flux_1x4090.sh
+```
+
+The warmup learning rate at iteration `i` is:
+
+```text
+base_lr * min(i / LR_WARMUP_STEPS, 1)
+```
+
+Because it depends only on the restored global iteration, no separate scheduler
+state is needed for auto-resume.
+
+Run the paper-oriented four-GPU configuration with condition-local TFD:
+
+```bash
+bash drifting/scripts/flux/sweeps/sweep_flux_4gpu_lr5e5_tfd100_anchor1_flow01_200k.sh
+```
+
+This uses `lr=5e-5`, `tfd=100`, `anchor=1`, `flow=0.1`, 500 warmup
+iterations, and four student/positive samples for each caption. After training,
+it evaluates the same final EMA checkpoint once without external CFG (one
+network forward) and once with `CFG=4.5` (two network forwards). Disable the
+final comparison with `RUN_CFG_COMPARISON=0`, or run it separately:
+
+```bash
+EXP_ID=flux_lr5e5_tfd100_anchor1_flow01_cond4_warmup500_200k_4gpu \
+bash drifting/scripts/flux/compare_cfg_one_forward.sh
 ```
 
 Evaluation overrides:

@@ -105,45 +105,100 @@ class TeacherFeatureDriftingLoss(nn.Module):
 
         for layer_name, generated in generated_features.items():
             positive = positive_features[layer_name]
-            if generated.shape[:-1] != positive.shape[:-1]:
+            anchors_for_layer = None if anchor_features is None else anchor_features[layer_name]
+
+            if generated.ndim in (2, 3):
+                generated_groups = (generated,)
+                positive_groups = (positive,)
+                anchor_groups = (anchors_for_layer,)
+            elif generated.ndim == 4:
+                if positive.ndim != 4:
+                    raise ValueError(
+                        f"{layer_name} generated/positive rank mismatch: "
+                        f"{generated.ndim} vs {positive.ndim}"
+                    )
+                if generated.shape[0] != positive.shape[0]:
+                    raise ValueError(
+                        f"{layer_name} generated/positive condition count mismatch: "
+                        f"{generated.shape[0]} vs {positive.shape[0]}"
+                    )
+                if anchors_for_layer is not None:
+                    if anchors_for_layer.ndim != 4 or anchors_for_layer.shape[0] != generated.shape[0]:
+                        raise ValueError(
+                            f"{layer_name} anchors must have rank 4 and the same condition count as "
+                            f"generated features, got {tuple(anchors_for_layer.shape)}"
+                        )
+                    anchor_groups = tuple(anchors_for_layer.unbind(dim=0))
+                else:
+                    anchor_groups = (None,) * generated.shape[0]
+                generated_groups = tuple(generated.unbind(dim=0))
+                positive_groups = tuple(positive.unbind(dim=0))
+            else:
                 raise ValueError(
-                    f"{layer_name} generated/positive shape mismatch: "
-                    f"{tuple(generated.shape)} vs {tuple(positive.shape)}"
+                    f"{layer_name} expected feature rank 2, 3, or grouped rank 4, "
+                    f"got shape {tuple(generated.shape)}"
                 )
 
-            query = _prepare_feature(generated, self.pool_tokens, self.normalize_features)
-            pos_keys = _prepare_feature(positive.detach(), self.pool_tokens, self.normalize_features)
-            gen_keys = query.detach()
-            radii = _as_radius_tensor(self.radii, query.device, query.dtype)
+            if generated.shape[-1] != positive.shape[-1]:
+                raise ValueError(
+                    f"{layer_name} generated/positive feature dimension mismatch: "
+                    f"{generated.shape[-1]} vs {positive.shape[-1]}"
+                )
 
-            layer_drift_terms = []
-            for radius in radii:
-                attraction = _mean_shift(query.detach(), pos_keys, radius)
-                repulsion = _mean_shift(query.detach(), gen_keys, radius)
-                target = (query + attraction - repulsion).detach()
-                layer_drift_terms.append(F.mse_loss(query, target))
-            layer_drift = torch.stack(layer_drift_terms).mean()
-            drifting_terms.append(layer_drift)
-
-            if anchor_features is not None:
-                anchors = _prepare_feature(
-                    anchor_features[layer_name].detach(),
+            condition_drift_terms: list[torch.Tensor] = []
+            condition_anchor_terms: list[torch.Tensor] = []
+            for generated_group, positive_group, anchor_group in zip(
+                generated_groups,
+                positive_groups,
+                anchor_groups,
+                strict=True,
+            ):
+                query = _prepare_feature(generated_group, self.pool_tokens, self.normalize_features)
+                pos_keys = _prepare_feature(
+                    positive_group.detach(),
                     self.pool_tokens,
                     self.normalize_features,
                 )
-            else:
-                anchors = pos_keys
-            layer_anchor_terms = []
-            for radius in radii:
-                support = _kernel_values(anchors.detach(), query, radius).mean(dim=-1)
-                anchor_dist_sq = torch.cdist(anchors.float(), anchors.float()).pow(2)
-                eye = torch.eye(anchor_dist_sq.shape[0], device=anchor_dist_sq.device, dtype=torch.bool)
-                self_weights = torch.exp(-anchor_dist_sq / (2.0 * radius.float())).masked_fill(eye, 0.0)
-                denom = (~eye).sum(dim=-1).clamp_min(1)
-                self_support = self_weights.sum(dim=-1) / denom
-                target_support = self.anchor_margin_alpha * self_support.detach()
-                layer_anchor_terms.append(F.relu(target_support - support).mean())
-            layer_anchor = torch.stack(layer_anchor_terms).mean()
+                gen_keys = query.detach()
+                radii = _as_radius_tensor(self.radii, query.device, query.dtype)
+
+                group_drift_terms = []
+                for radius in radii:
+                    attraction = _mean_shift(query.detach(), pos_keys, radius)
+                    repulsion = _mean_shift(query.detach(), gen_keys, radius)
+                    target = (query + attraction - repulsion).detach()
+                    group_drift_terms.append(F.mse_loss(query, target))
+                condition_drift_terms.append(torch.stack(group_drift_terms).mean())
+
+                if anchor_group is not None:
+                    anchors = _prepare_feature(
+                        anchor_group.detach(),
+                        self.pool_tokens,
+                        self.normalize_features,
+                    )
+                else:
+                    anchors = pos_keys
+                group_anchor_terms = []
+                for radius in radii:
+                    support = _kernel_values(anchors.detach(), query, radius).mean(dim=-1)
+                    anchor_dist_sq = torch.cdist(anchors.float(), anchors.float()).pow(2)
+                    eye = torch.eye(
+                        anchor_dist_sq.shape[0],
+                        device=anchor_dist_sq.device,
+                        dtype=torch.bool,
+                    )
+                    self_weights = torch.exp(
+                        -anchor_dist_sq / (2.0 * radius.float())
+                    ).masked_fill(eye, 0.0)
+                    denom = (~eye).sum(dim=-1).clamp_min(1)
+                    self_support = self_weights.sum(dim=-1) / denom
+                    target_support = self.anchor_margin_alpha * self_support.detach()
+                    group_anchor_terms.append(F.relu(target_support - support).mean())
+                condition_anchor_terms.append(torch.stack(group_anchor_terms).mean())
+
+            layer_drift = torch.stack(condition_drift_terms).mean()
+            drifting_terms.append(layer_drift)
+            layer_anchor = torch.stack(condition_anchor_terms).mean()
             anchor_terms.append(layer_anchor)
             per_layer[layer_name] = layer_drift.detach()
 

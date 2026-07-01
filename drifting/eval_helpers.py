@@ -228,15 +228,7 @@ def run_checkpoint_evaluation(
     if extra_args:
         raise ValueError("extra_args is not supported when using eval_drifting_checkpoint.sh")
     env = os.environ.copy()
-    for key in (
-        "RANK",
-        "LOCAL_RANK",
-        "WORLD_SIZE",
-        "MASTER_ADDR",
-        "MASTER_PORT",
-        "HF_HUB_OFFLINE",
-        "TRANSFORMERS_OFFLINE",
-    ):
+    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
         env.pop(key, None)
     eval_cuda_visible_devices = eval_cuda_visible_devices or _first_visible_cuda_device()
     if stream_prefix is None:

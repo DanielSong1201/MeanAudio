@@ -12,7 +12,8 @@ from meanaudio.model.teacher_feature_drifting import TeacherFeatureDriftingLoss
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--conditions", type=int, default=2)
+    parser.add_argument("--samples-per-condition", type=int, default=4)
     parser.add_argument("--tokens", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--pool-tokens", type=int, default=16)
@@ -28,7 +29,8 @@ def main() -> None:
     layers = ("joint_3", "fused_3", "fused_7")
     generated = {
         layer: torch.randn(
-            args.batch_size,
+            args.conditions,
+            args.samples_per_condition,
             args.tokens,
             args.hidden_dim,
             device=device,
@@ -38,7 +40,14 @@ def main() -> None:
         for layer in layers
     }
     positive = {
-        layer: torch.randn(args.batch_size, args.tokens, args.hidden_dim, device=device, dtype=dtype)
+        layer: torch.randn(
+            args.conditions,
+            args.samples_per_condition,
+            args.tokens,
+            args.hidden_dim,
+            device=device,
+            dtype=dtype,
+        )
         for layer in layers
     }
 

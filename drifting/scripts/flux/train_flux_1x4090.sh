@@ -3,13 +3,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
-export DRIFTING_CKPT_DIR="${DRIFTING_CKPT_DIR:-drifting/ckpts}"
-bash drifting/scripts/prepare_hf_ckpts.sh
-export HF_HOME="${DRIFTING_CKPT_DIR}/huggingface"
-export HF_HUB_CACHE="${DRIFTING_CKPT_DIR}/huggingface/hub"
-export TRANSFORMERS_CACHE="${DRIFTING_CKPT_DIR}/huggingface/transformers"
-unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
-
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 EXP_ID_VALUE="${EXP_ID:-flux_drifting_s_1x4090}"
@@ -20,6 +13,7 @@ BATCH_SIZE_VALUE="${BATCH_SIZE:-4}"
 NUM_WORKERS_VALUE="${NUM_WORKERS:-4}"
 ITERATIONS_VALUE="${ITERATIONS:-1000000}"
 LEARNING_RATE_VALUE="${LEARNING_RATE:-5e-5}"
+LR_WARMUP_STEPS_VALUE="${LR_WARMUP_STEPS:-500}"
 LOG_INTERVAL_VALUE="${LOG_INTERVAL:-20}"
 SAVE_INTERVAL_VALUE="${SAVE_INTERVAL:-1000}"
 EVAL_INTERVAL_VALUE="${EVAL_INTERVAL:-10000}"
@@ -37,6 +31,7 @@ LAMBDA_TFD_VALUE="${LAMBDA_TFD:-0.2}"
 LAMBDA_ANCHOR_VALUE="${LAMBDA_ANCHOR:-0.05}"
 FEATURE_NOISE_VALUE="${FEATURE_NOISE:-0.1}"
 POOL_TOKENS_VALUE="${POOL_TOKENS:-64}"
+SAMPLES_PER_CONDITION_VALUE="${SAMPLES_PER_CONDITION:-1}"
 AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
 LOG_PREFIX_VALUE="${LOG_PREFIX:-}"
 AUTO_RESUME_ARGS=()
@@ -77,6 +72,7 @@ print_config "EFFECTIVE_BATCH_SIZE" "${BATCH_SIZE_VALUE}"
 print_config "NUM_WORKERS" "${NUM_WORKERS_VALUE}"
 print_config "ITERATIONS" "${ITERATIONS_VALUE}"
 print_config "LEARNING_RATE" "${LEARNING_RATE_VALUE}"
+print_config "LR_WARMUP_STEPS" "${LR_WARMUP_STEPS_VALUE}"
 print_config "LOG_INTERVAL" "${LOG_INTERVAL_VALUE}"
 print_config "SAVE_INTERVAL" "${SAVE_INTERVAL_VALUE}"
 print_config "EVAL_INTERVAL" "${EVAL_INTERVAL_VALUE}"
@@ -94,6 +90,8 @@ print_config "LAMBDA_TFD" "${LAMBDA_TFD_VALUE}"
 print_config "LAMBDA_ANCHOR" "${LAMBDA_ANCHOR_VALUE}"
 print_config "FEATURE_NOISE" "${FEATURE_NOISE_VALUE}"
 print_config "POOL_TOKENS" "${POOL_TOKENS_VALUE}"
+print_config "SAMPLES_PER_CONDITION" "${SAMPLES_PER_CONDITION_VALUE}"
+print_config "MODEL_SAMPLES_PER_GPU" "$((BATCH_SIZE_VALUE * SAMPLES_PER_CONDITION_VALUE))"
 print_config "AUTO_RESUME" "${AUTO_RESUME_VALUE}"
 print_config "USE_ROPE" "1"
 print_config "AMP" "1"
@@ -107,6 +105,7 @@ python drifting/flux/train.py \
   --num-workers "${NUM_WORKERS_VALUE}" \
   --iterations "${ITERATIONS_VALUE}" \
   --learning-rate "${LEARNING_RATE_VALUE}" \
+  --lr-warmup-steps "${LR_WARMUP_STEPS_VALUE}" \
   --log-interval "${LOG_INTERVAL_VALUE}" \
   --save-interval "${SAVE_INTERVAL_VALUE}" \
   --eval-interval "${EVAL_INTERVAL_VALUE}" \
@@ -124,6 +123,7 @@ python drifting/flux/train.py \
   --lambda-anchor "${LAMBDA_ANCHOR_VALUE}" \
   --feature-noise "${FEATURE_NOISE_VALUE}" \
   --pool-tokens "${POOL_TOKENS_VALUE}" \
+  --samples-per-condition "${SAMPLES_PER_CONDITION_VALUE}" \
   --use-rope \
   --amp \
   "${AUTO_RESUME_ARGS[@]}"

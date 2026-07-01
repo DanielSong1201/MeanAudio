@@ -235,6 +235,7 @@ class FluxDriftingModule(nn.Module):
         feature_layers: tuple[str, ...],
         feature_noise: float,
         lambda_flow: float,
+        samples_per_condition: int,
     ) -> None:
         super().__init__()
         self.student = student
@@ -243,6 +244,7 @@ class FluxDriftingModule(nn.Module):
         self.feature_layers = feature_layers
         self.feature_noise = feature_noise
         self.lambda_flow = lambda_flow
+        self.samples_per_condition = samples_per_condition
 
     def forward(
         self,
@@ -262,6 +264,7 @@ class FluxDriftingModule(nn.Module):
             feature_layers=self.feature_layers,
             feature_noise=self.feature_noise,
             lambda_flow=self.lambda_flow,
+            samples_per_condition=self.samples_per_condition,
         )
 
 
@@ -300,7 +303,34 @@ def one_step_flux_loss(
     feature_layers: tuple[str, ...],
     feature_noise: float,
     lambda_flow: float,
+    samples_per_condition: int = 1,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if samples_per_condition < 1:
+        raise ValueError("samples_per_condition must be >= 1")
+
+    condition_batch_size = a_mean.shape[0]
+    if samples_per_condition > 1:
+        text_f = (
+            text_f.unsqueeze(1)
+            .expand(-1, samples_per_condition, *text_f.shape[1:])
+            .reshape(condition_batch_size * samples_per_condition, *text_f.shape[1:])
+        )
+        text_f_c = (
+            text_f_c.unsqueeze(1)
+            .expand(-1, samples_per_condition, *text_f_c.shape[1:])
+            .reshape(condition_batch_size * samples_per_condition, *text_f_c.shape[1:])
+        )
+        a_mean = (
+            a_mean.unsqueeze(1)
+            .expand(-1, samples_per_condition, *a_mean.shape[1:])
+            .reshape(condition_batch_size * samples_per_condition, *a_mean.shape[1:])
+        )
+        a_std = (
+            a_std.unsqueeze(1)
+            .expand(-1, samples_per_condition, *a_std.shape[1:])
+            .reshape(condition_batch_size * samples_per_condition, *a_std.shape[1:])
+        )
+
     x_real = a_mean + a_std * torch.randn_like(a_mean)
     x_real = student.normalize(x_real)
     x_noise = torch.randn_like(x_real)
@@ -331,6 +361,22 @@ def one_step_flux_loss(
         teacher_conditions,
         layers=feature_layers,
     )
+    positive_features = {
+        name: feature.reshape(
+            condition_batch_size,
+            samples_per_condition,
+            *feature.shape[1:],
+        )
+        for name, feature in positive_features.items()
+    }
+    generated_features = {
+        name: feature.reshape(
+            condition_batch_size,
+            samples_per_condition,
+            *feature.shape[1:],
+        )
+        for name, feature in generated_features.items()
+    }
     tfd_output = criterion(generated_features, positive_features)
     total_loss = lambda_flow * flow_loss + tfd_output.loss
     return total_loss, {
@@ -356,6 +402,7 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=1_000_000)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
+    parser.add_argument("--lr-warmup-steps", type=int, default=500)
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=14159265)
     parser.add_argument("--device", default="cuda")
@@ -364,6 +411,15 @@ def main() -> None:
     parser.add_argument("--feature-layers", default="joint_3,fused_3,fused_7")
     parser.add_argument("--feature-noise", type=float, default=0.1)
     parser.add_argument("--pool-tokens", type=int, default=64)
+    parser.add_argument(
+        "--samples-per-condition",
+        type=int,
+        default=1,
+        help=(
+            "Generate this many student/positive samples per caption. TFD neighborhoods "
+            "are always kept condition-local."
+        ),
+    )
     parser.add_argument("--radii", default="0.02,0.05,0.1,0.2")
     parser.add_argument("--lambda-flow", type=float, default=1.0)
     parser.add_argument("--lambda-tfd", type=float, default=0.2)
@@ -407,6 +463,10 @@ def main() -> None:
     logger.info("Arguments: %s", vars(args))
     if args.ema and args.ema_update_interval < 1:
         raise ValueError("--ema-update-interval must be >= 1")
+    if args.lr_warmup_steps < 0:
+        raise ValueError("--lr-warmup-steps must be >= 0")
+    if args.samples_per_condition < 1:
+        raise ValueError("--samples-per-condition must be >= 1")
     if args.ema and args.ema_device == "cuda" and device.type != "cuda":
         raise ValueError("--ema-device cuda requires --device cuda")
 
@@ -582,6 +642,7 @@ def main() -> None:
         feature_layers=feature_layers,
         feature_noise=args.feature_noise,
         lambda_flow=args.lambda_flow,
+        samples_per_condition=args.samples_per_condition,
     ).to(device)
     if distributed:
         train_module = DistributedDataParallel(
@@ -653,6 +714,13 @@ def main() -> None:
 
         with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=use_amp):
             total_loss, loss_parts = train_module(text_f, text_f_c, a_mean, a_std)
+
+        if args.lr_warmup_steps > 0:
+            lr_scale = min(iteration / args.lr_warmup_steps, 1.0)
+        else:
+            lr_scale = 1.0
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = args.learning_rate * lr_scale
 
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward()

@@ -3,13 +3,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
-export DRIFTING_CKPT_DIR="${DRIFTING_CKPT_DIR:-drifting/ckpts}"
-bash drifting/scripts/prepare_hf_ckpts.sh
-export HF_HOME="${DRIFTING_CKPT_DIR}/huggingface"
-export HF_HUB_CACHE="${DRIFTING_CKPT_DIR}/huggingface/hub"
-export TRANSFORMERS_CACHE="${DRIFTING_CKPT_DIR}/huggingface/transformers"
-unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
-
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-180}"
 NPROC_PER_NODE_VALUE="${NPROC_PER_NODE:-2}"
@@ -22,6 +15,7 @@ BATCH_SIZE_VALUE="${BATCH_SIZE:-4}"
 NUM_WORKERS_VALUE="${NUM_WORKERS:-4}"
 ITERATIONS_VALUE="${ITERATIONS:-1000000}"
 LEARNING_RATE_VALUE="${LEARNING_RATE:-5e-5}"
+LR_WARMUP_STEPS_VALUE="${LR_WARMUP_STEPS:-500}"
 LOG_INTERVAL_VALUE="${LOG_INTERVAL:-20}"
 SAVE_INTERVAL_VALUE="${SAVE_INTERVAL:-1000}"
 EVAL_INTERVAL_VALUE="${EVAL_INTERVAL:-10000}"
@@ -39,6 +33,7 @@ LAMBDA_TFD_VALUE="${LAMBDA_TFD:-0.2}"
 LAMBDA_ANCHOR_VALUE="${LAMBDA_ANCHOR:-0.05}"
 FEATURE_NOISE_VALUE="${FEATURE_NOISE:-0.1}"
 POOL_TOKENS_VALUE="${POOL_TOKENS:-64}"
+SAMPLES_PER_CONDITION_VALUE="${SAMPLES_PER_CONDITION:-1}"
 EFFECTIVE_BATCH_SIZE_VALUE=$((BATCH_SIZE_VALUE * NPROC_PER_NODE_VALUE))
 AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
 AUTO_RESUME_ARGS=()
@@ -72,6 +67,7 @@ printf 'train_config EFFECTIVE_BATCH_SIZE=%s\n' "${EFFECTIVE_BATCH_SIZE_VALUE}"
 printf 'train_config NUM_WORKERS=%s\n' "${NUM_WORKERS_VALUE}"
 printf 'train_config ITERATIONS=%s\n' "${ITERATIONS_VALUE}"
 printf 'train_config LEARNING_RATE=%s\n' "${LEARNING_RATE_VALUE}"
+printf 'train_config LR_WARMUP_STEPS=%s\n' "${LR_WARMUP_STEPS_VALUE}"
 printf 'train_config LOG_INTERVAL=%s\n' "${LOG_INTERVAL_VALUE}"
 printf 'train_config SAVE_INTERVAL=%s\n' "${SAVE_INTERVAL_VALUE}"
 printf 'train_config EVAL_INTERVAL=%s\n' "${EVAL_INTERVAL_VALUE}"
@@ -89,6 +85,8 @@ printf 'train_config LAMBDA_TFD=%s\n' "${LAMBDA_TFD_VALUE}"
 printf 'train_config LAMBDA_ANCHOR=%s\n' "${LAMBDA_ANCHOR_VALUE}"
 printf 'train_config FEATURE_NOISE=%s\n' "${FEATURE_NOISE_VALUE}"
 printf 'train_config POOL_TOKENS=%s\n' "${POOL_TOKENS_VALUE}"
+printf 'train_config SAMPLES_PER_CONDITION=%s\n' "${SAMPLES_PER_CONDITION_VALUE}"
+printf 'train_config MODEL_SAMPLES_PER_GPU=%s\n' "$((BATCH_SIZE_VALUE * SAMPLES_PER_CONDITION_VALUE))"
 printf 'train_config AUTO_RESUME=%s\n' "${AUTO_RESUME_VALUE}"
 printf 'train_config USE_ROPE=%s\n' "1"
 printf 'train_config AMP=%s\n' "1"
@@ -102,6 +100,7 @@ torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" drifting/flux/t
   --num-workers "${NUM_WORKERS_VALUE}" \
   --iterations "${ITERATIONS_VALUE}" \
   --learning-rate "${LEARNING_RATE_VALUE}" \
+  --lr-warmup-steps "${LR_WARMUP_STEPS_VALUE}" \
   --log-interval "${LOG_INTERVAL_VALUE}" \
   --save-interval "${SAVE_INTERVAL_VALUE}" \
   --eval-interval "${EVAL_INTERVAL_VALUE}" \
@@ -119,6 +118,7 @@ torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" drifting/flux/t
   --lambda-anchor "${LAMBDA_ANCHOR_VALUE}" \
   --feature-noise "${FEATURE_NOISE_VALUE}" \
   --pool-tokens "${POOL_TOKENS_VALUE}" \
+  --samples-per-condition "${SAMPLES_PER_CONDITION_VALUE}" \
   --use-rope \
   --amp \
   "${AUTO_RESUME_ARGS[@]}"

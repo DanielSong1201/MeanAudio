@@ -82,54 +82,6 @@ Training can start without this path, but full evaluation will fail.
 
 ### 3.1 Download Required Weights
 
-Every Flux training entrypoint now runs the following preparation step before
-starting Python or `torchrun`:
-
-```bash
-bash drifting/scripts/prepare_hf_ckpts.sh
-```
-
-Hugging Face assets are stored under:
-
-```text
-drifting/ckpts/
-  bert-base-uncased/
-  huggingface/
-  laion-clap/
-  meanaudio/
-  msclap/
-```
-
-The preparation script downloads only missing assets. Concurrent sweep tasks
-share a file lock, so only one process downloads while the others wait and then
-reuse the completed cache. Existing files in `weights/` are reused with hard
-links when possible. Compatibility links are created in `weights/` and
-`av-benchmark/weights/`.
-
-Optional cache diagnostic with strict offline loading:
-
-```bash
-bash drifting/scripts/test_local_hf_ckpts.sh
-```
-
-This diagnostic does not control training-time evaluation. Flux training
-explicitly clears `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE`, so evaluation
-can fetch missing model files from Hugging Face.
-
-Test the existing cache without allowing downloads:
-
-```bash
-PREPARE_CKPTS=0 bash drifting/scripts/test_local_hf_ckpts.sh
-```
-
-Use a different cache root:
-
-```bash
-DRIFTING_CKPT_DIR=/path/to/shared/ckpts bash drifting/scripts/test_local_hf_ckpts.sh
-```
-
-The older Phase-0 helper remains available:
-
 The Phase-0 helper downloads the required public weights from Hugging Face:
 
 ```bash
@@ -413,10 +365,10 @@ EVAL_INTERVAL=0 bash drifting/scripts/flux/train_flux_1x4090.sh
 By default, training-time eval uses EMA checkpoints. To evaluate raw weights
 during training, call the Python entrypoint with `--eval-raw`.
 
-Training-time evaluation uses online Hugging Face resolution and reuses
-anything already present in `drifting/ckpts/huggingface`. An evaluation failure,
-including a Hugging Face connection failure, is logged under the iteration's
-`eval_driver.log` and does not terminate the training loop. Set
+Training-time evaluation uses the standard Hugging Face resolution configured
+by the server environment. It does not pre-download models or redirect the Hub
+cache into this repository. An evaluation failure is logged under the
+iteration's `eval_driver.log` and does not terminate the training loop. Set
 `EVAL_FAILURE_FATAL=1` only when an eval failure should stop training.
 
 ## 11. Manual Evaluation
