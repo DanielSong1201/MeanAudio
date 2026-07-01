@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
-exp_id="${EXP_ID:-flux_lr5e5_tfd100_anchor1_flow01_cond4_warmup500_200k_4gpu}"
+exp_id="${EXP_ID:-flux_lr5e5_tfd100_anchor1_flow01_hybridpos4_warmup500_200k_4gpu}"
 train_root="${TRAIN_ROOT:-exps/drifting_flux}"
 eval_root="${EVAL_ROOT:-exps/drifting_flux_eval_cfg_comparison}"
 model_path="${MODEL_PATH:-${train_root}/${exp_id}/${exp_id}_ema_last.pth}"

@@ -34,11 +34,20 @@ LAMBDA_ANCHOR_VALUE="${LAMBDA_ANCHOR:-0.05}"
 FEATURE_NOISE_VALUE="${FEATURE_NOISE:-0.1}"
 POOL_TOKENS_VALUE="${POOL_TOKENS:-64}"
 SAMPLES_PER_CONDITION_VALUE="${SAMPLES_PER_CONDITION:-1}"
+TEACHER_POSITIVE_DIR_VALUE="${TEACHER_POSITIVE_DIR:-}"
+TEACHER_POSITIVE_COUNT_VALUE="${TEACHER_POSITIVE_COUNT:-3}"
 EFFECTIVE_BATCH_SIZE_VALUE=$((BATCH_SIZE_VALUE * NPROC_PER_NODE_VALUE))
 AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
 AUTO_RESUME_ARGS=()
 if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
   AUTO_RESUME_ARGS=(--no-auto-resume)
+fi
+TEACHER_POSITIVE_ARGS=()
+if [[ -n "${TEACHER_POSITIVE_DIR_VALUE}" ]]; then
+  TEACHER_POSITIVE_ARGS=(
+    --teacher-positive-dir "${TEACHER_POSITIVE_DIR_VALUE}"
+    --teacher-positive-count "${TEACHER_POSITIVE_COUNT_VALUE}"
+  )
 fi
 
 if ! command -v flock >/dev/null 2>&1; then
@@ -87,6 +96,8 @@ printf 'train_config FEATURE_NOISE=%s\n' "${FEATURE_NOISE_VALUE}"
 printf 'train_config POOL_TOKENS=%s\n' "${POOL_TOKENS_VALUE}"
 printf 'train_config SAMPLES_PER_CONDITION=%s\n' "${SAMPLES_PER_CONDITION_VALUE}"
 printf 'train_config MODEL_SAMPLES_PER_GPU=%s\n' "$((BATCH_SIZE_VALUE * SAMPLES_PER_CONDITION_VALUE))"
+printf 'train_config TEACHER_POSITIVE_DIR=%s\n' "${TEACHER_POSITIVE_DIR_VALUE:-disabled}"
+printf 'train_config TEACHER_POSITIVE_COUNT=%s\n' "${TEACHER_POSITIVE_COUNT_VALUE}"
 printf 'train_config AUTO_RESUME=%s\n' "${AUTO_RESUME_VALUE}"
 printf 'train_config USE_ROPE=%s\n' "1"
 printf 'train_config AMP=%s\n' "1"
@@ -119,6 +130,7 @@ torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" drifting/flux/t
   --feature-noise "${FEATURE_NOISE_VALUE}" \
   --pool-tokens "${POOL_TOKENS_VALUE}" \
   --samples-per-condition "${SAMPLES_PER_CONDITION_VALUE}" \
+  "${TEACHER_POSITIVE_ARGS[@]}" \
   --use-rope \
   --amp \
   "${AUTO_RESUME_ARGS[@]}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import random
@@ -75,8 +76,17 @@ def save_training_state(
 
 
 class AudioCapsNpzDataset(Dataset):
-    def __init__(self, *, tsv_path: Path, npz_dir: Path) -> None:
+    def __init__(
+        self,
+        *,
+        tsv_path: Path,
+        npz_dir: Path,
+        teacher_positive_dir: Path | None = None,
+        teacher_positive_count: int = 3,
+    ) -> None:
         self.npz_dir = npz_dir
+        self.teacher_positive_dir = teacher_positive_dir
+        self.teacher_positive_count = teacher_positive_count
         with tsv_path.open("r", newline="") as f:
             self.rows = list(csv.DictReader(f, delimiter="\t"))
         if not self.rows:
@@ -85,20 +95,61 @@ class AudioCapsNpzDataset(Dataset):
             raise FileNotFoundError(f"Missing npz directory: {npz_dir}")
         if not (npz_dir / "0.npz").exists():
             raise FileNotFoundError(f"Missing sample npz: {npz_dir / '0.npz'}")
+        if teacher_positive_dir is not None:
+            completion_path = teacher_positive_dir / "complete.json"
+            if not completion_path.exists():
+                raise FileNotFoundError(
+                    f"Teacher-positive bank is incomplete: missing {completion_path}. "
+                    "Run drifting/scripts/flux/build_teacher_positive_bank_4gpu.sh first."
+                )
+            if teacher_positive_count < 1:
+                raise ValueError("teacher_positive_count must be >= 1 when a bank is configured")
+            completion = json.loads(completion_path.read_text())
+            if completion.get("num_items") != len(self.rows):
+                raise ValueError(
+                    f"Teacher-positive bank contains {completion.get('num_items')} items, "
+                    f"but the training split contains {len(self.rows)}"
+                )
+            available_count = completion.get("positives_per_condition")
+            if not isinstance(available_count, int) or available_count < teacher_positive_count:
+                raise ValueError(
+                    f"Teacher-positive bank provides {available_count} positives per condition, "
+                    f"but {teacher_positive_count} were requested"
+                )
+            if completion.get("normalized_latents") is not True:
+                raise ValueError("Teacher-positive bank must contain normalized latents")
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        data = np.load(self.npz_dir / f"{idx}.npz")
-        return {
-            "id": self.rows[idx]["id"],
-            "caption": self.rows[idx]["caption"],
-            "a_mean": torch.from_numpy(data["mean"]),
-            "a_std": torch.from_numpy(data["std"]),
-            "text_features": torch.from_numpy(data["text_features"]),
-            "text_features_c": torch.from_numpy(data["text_features_c"]),
-        }
+        with np.load(self.npz_dir / f"{idx}.npz") as data:
+            item = {
+                "index": idx,
+                "id": self.rows[idx]["id"],
+                "caption": self.rows[idx]["caption"],
+                "a_mean": torch.from_numpy(data["mean"]),
+                "a_std": torch.from_numpy(data["std"]),
+                "text_features": torch.from_numpy(data["text_features"]),
+                "text_features_c": torch.from_numpy(data["text_features_c"]),
+            }
+        if self.teacher_positive_dir is not None:
+            positive_path = self.teacher_positive_dir / f"{idx}.npz"
+            if not positive_path.exists():
+                raise FileNotFoundError(f"Missing teacher positives: {positive_path}")
+            with np.load(positive_path) as positive_data:
+                if "latents_normalized" not in positive_data:
+                    raise KeyError(f"Missing 'latents_normalized' in {positive_path}")
+                teacher_positives = positive_data["latents_normalized"]
+            if teacher_positives.shape[0] < self.teacher_positive_count:
+                raise ValueError(
+                    f"{positive_path} has {teacher_positives.shape[0]} teacher positives, "
+                    f"expected at least {self.teacher_positive_count}"
+                )
+            item["teacher_positives"] = torch.from_numpy(
+                teacher_positives[: self.teacher_positive_count].copy()
+            )
+        return item
 
 
 def setup_logger(output_dir: Path, *, enabled: bool = True) -> logging.Logger:
@@ -252,6 +303,7 @@ class FluxDriftingModule(nn.Module):
         text_f_c: torch.Tensor,
         a_mean: torch.Tensor,
         a_std: torch.Tensor,
+        teacher_positives: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         return one_step_flux_loss(
             student=self.student,
@@ -265,6 +317,7 @@ class FluxDriftingModule(nn.Module):
             feature_noise=self.feature_noise,
             lambda_flow=self.lambda_flow,
             samples_per_condition=self.samples_per_condition,
+            teacher_positives=teacher_positives,
         )
 
 
@@ -304,11 +357,17 @@ def one_step_flux_loss(
     feature_noise: float,
     lambda_flow: float,
     samples_per_condition: int = 1,
+    teacher_positives: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if samples_per_condition < 1:
         raise ValueError("samples_per_condition must be >= 1")
 
     condition_batch_size = a_mean.shape[0]
+    real_a_mean = a_mean
+    real_a_std = a_std
+    condition_text_f = text_f
+    condition_text_f_c = text_f_c
+
     if samples_per_condition > 1:
         text_f = (
             text_f.unsqueeze(1)
@@ -331,40 +390,145 @@ def one_step_flux_loss(
             .reshape(condition_batch_size * samples_per_condition, *a_std.shape[1:])
         )
 
-    x_real = a_mean + a_std * torch.randn_like(a_mean)
-    x_real = student.normalize(x_real)
-    x_noise = torch.randn_like(x_real)
+    x_real_for_flow = a_mean + a_std * torch.randn_like(a_mean)
+    x_real_for_flow = student.normalize(x_real_for_flow)
+    x_noise = torch.randn_like(x_real_for_flow)
 
-    t_one = torch.ones(x_real.shape[0], device=x_real.device, dtype=x_real.dtype)
+    t_one = torch.ones(
+        x_real_for_flow.shape[0],
+        device=x_real_for_flow.device,
+        dtype=x_real_for_flow.dtype,
+    )
     student_conditions = student.preprocess_conditions(text_f, text_f_c)
     pred_flow = student.predict_flow(x_noise, t_one, student_conditions)
-    target_flow = x_noise - x_real
+    target_flow = x_noise - x_real_for_flow
     flow_loss = (pred_flow - target_flow).pow(2).mean()
     x_student = x_noise - pred_flow
 
-    sigma = torch.full((x_real.shape[0], 1, 1), feature_noise, device=x_real.device, dtype=x_real.dtype)
-    x_real_feat = (1.0 - sigma) * x_real.detach() + sigma * torch.randn_like(x_real)
-    x_student_feat = (1.0 - sigma) * x_student + sigma * torch.randn_like(x_student)
-    feature_t = torch.full((x_real.shape[0],), feature_noise, device=x_real.device, dtype=x_real.dtype)
+    if teacher_positives is None:
+        positive_count = samples_per_condition
+        positive_latents = real_a_mean.unsqueeze(1).expand(
+            -1,
+            positive_count,
+            *real_a_mean.shape[1:],
+        ) + real_a_std.unsqueeze(1).expand(
+            -1,
+            positive_count,
+            *real_a_std.shape[1:],
+        ) * torch.randn(
+            condition_batch_size,
+            positive_count,
+            *real_a_std.shape[1:],
+            device=real_a_std.device,
+            dtype=real_a_std.dtype,
+        )
+        positive_shape = positive_latents.shape[2:]
+        positive_latents = student.normalize(
+            positive_latents.reshape(
+                condition_batch_size * positive_count,
+                *positive_shape,
+            )
+        ).reshape(condition_batch_size, positive_count, *positive_shape)
+    else:
+        if teacher_positives.ndim != 4:
+            raise ValueError(
+                "teacher_positives must have shape [conditions, positives, latent_tokens, latent_dim], "
+                f"got {tuple(teacher_positives.shape)}"
+            )
+        if teacher_positives.shape[0] != condition_batch_size:
+            raise ValueError(
+                "teacher_positives condition count mismatch: "
+                f"{teacher_positives.shape[0]} vs {condition_batch_size}"
+            )
+        real_positive = real_a_mean + real_a_std * torch.randn_like(real_a_mean)
+        real_positive = student.normalize(real_positive).unsqueeze(1)
+        if teacher_positives.shape[2:] != real_positive.shape[2:]:
+            raise ValueError(
+                "Teacher-positive latent shape mismatch: "
+                f"{tuple(teacher_positives.shape[2:])} vs {tuple(real_positive.shape[2:])}"
+            )
+        positive_latents = torch.cat(
+            [
+                real_positive,
+                teacher_positives.to(
+                    device=real_positive.device,
+                    dtype=real_positive.dtype,
+                ),
+            ],
+            dim=1,
+        )
+        positive_count = positive_latents.shape[1]
 
-    teacher_conditions = teacher.preprocess_conditions(text_f, text_f_c)
+    positive_latents_flat = positive_latents.reshape(
+        condition_batch_size * positive_count,
+        *positive_latents.shape[2:],
+    )
+    positive_text_f = (
+        condition_text_f.unsqueeze(1)
+        .expand(-1, positive_count, *condition_text_f.shape[1:])
+        .reshape(condition_batch_size * positive_count, *condition_text_f.shape[1:])
+    )
+    positive_text_f_c = (
+        condition_text_f_c.unsqueeze(1)
+        .expand(-1, positive_count, *condition_text_f_c.shape[1:])
+        .reshape(condition_batch_size * positive_count, *condition_text_f_c.shape[1:])
+    )
+
+    positive_sigma = torch.full(
+        (positive_latents_flat.shape[0], 1, 1),
+        feature_noise,
+        device=positive_latents_flat.device,
+        dtype=positive_latents_flat.dtype,
+    )
+    generated_sigma = torch.full(
+        (x_student.shape[0], 1, 1),
+        feature_noise,
+        device=x_student.device,
+        dtype=x_student.dtype,
+    )
+    positive_latents_feat = (
+        (1.0 - positive_sigma) * positive_latents_flat.detach()
+        + positive_sigma * torch.randn_like(positive_latents_flat)
+    )
+    x_student_feat = (
+        (1.0 - generated_sigma) * x_student
+        + generated_sigma * torch.randn_like(x_student)
+    )
+    positive_feature_t = torch.full(
+        (positive_latents_flat.shape[0],),
+        feature_noise,
+        device=positive_latents_flat.device,
+        dtype=positive_latents_flat.dtype,
+    )
+    generated_feature_t = torch.full(
+        (x_student.shape[0],),
+        feature_noise,
+        device=x_student.device,
+        dtype=x_student.dtype,
+    )
+
+    positive_teacher_conditions = teacher.preprocess_conditions(
+        positive_text_f,
+        positive_text_f_c,
+    )
+    generated_teacher_conditions = teacher.preprocess_conditions(text_f, text_f_c)
     with torch.no_grad():
         positive_features = teacher.extract_features(
-            x_real_feat,
-            feature_t,
-            teacher_conditions,
+            positive_latents_feat,
+            positive_feature_t,
+            positive_teacher_conditions,
             layers=feature_layers,
         )
     generated_features = teacher.extract_features(
         x_student_feat,
-        feature_t,
-        teacher_conditions,
+        generated_feature_t,
+        generated_teacher_conditions,
         layers=feature_layers,
     )
     positive_features = {
         name: feature.reshape(
             condition_batch_size,
-            samples_per_condition,
+            positive_count,
             *feature.shape[1:],
         )
         for name, feature in positive_features.items()
@@ -393,6 +557,13 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=Path("exps/drifting_flux"))
     parser.add_argument("--data-config", type=Path, default=Path("config/data/t5_clap.yaml"))
     parser.add_argument("--train-split", default="AudioCaps_npz")
+    parser.add_argument(
+        "--teacher-positive-dir",
+        type=Path,
+        default=None,
+        help="Directory containing offline normalized teacher-positive latent NPZ files.",
+    )
+    parser.add_argument("--teacher-positive-count", type=int, default=3)
     parser.add_argument("--weights-dir", type=Path, default=Path("weights"))
     parser.add_argument("--teacher-weights", type=Path, default=Path("weights/fluxaudio_s_full.pth"))
     parser.add_argument("--student-init", type=Path, default=Path("weights/fluxaudio_s_full.pth"))
@@ -467,6 +638,16 @@ def main() -> None:
         raise ValueError("--lr-warmup-steps must be >= 0")
     if args.samples_per_condition < 1:
         raise ValueError("--samples-per-condition must be >= 1")
+    if args.teacher_positive_dir is not None and args.teacher_positive_count < 1:
+        raise ValueError("--teacher-positive-count must be >= 1")
+    if (
+        args.teacher_positive_dir is not None
+        and args.samples_per_condition != args.teacher_positive_count + 1
+    ):
+        raise ValueError(
+            "Paper-aligned hybrid positives require --samples-per-condition to equal "
+            "1 real positive + --teacher-positive-count generated positives"
+        )
     if args.ema and args.ema_device == "cuda" and device.type != "cuda":
         raise ValueError("--ema-device cuda requires --device cuda")
 
@@ -536,7 +717,12 @@ def main() -> None:
 
     data_cfg = load_data_config(args.data_config, args.train_split)
     split_cfg = data_cfg[args.train_split]
-    dataset = AudioCapsNpzDataset(tsv_path=Path(split_cfg["tsv"]), npz_dir=Path(split_cfg["npz_dir"]))
+    dataset = AudioCapsNpzDataset(
+        tsv_path=Path(split_cfg["tsv"]),
+        npz_dir=Path(split_cfg["npz_dir"]),
+        teacher_positive_dir=args.teacher_positive_dir,
+        teacher_positive_count=args.teacher_positive_count,
+    )
     sampler = DistributedSampler(
         dataset,
         num_replicas=world_size,
@@ -711,9 +897,18 @@ def main() -> None:
         text_f_c = batch["text_features_c"].to(device=device, non_blocking=True)
         a_mean = batch["a_mean"].to(device=device, non_blocking=True)
         a_std = batch["a_std"].to(device=device, non_blocking=True)
+        teacher_positives = batch.get("teacher_positives")
+        if teacher_positives is not None:
+            teacher_positives = teacher_positives.to(device=device, non_blocking=True)
 
         with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=use_amp):
-            total_loss, loss_parts = train_module(text_f, text_f_c, a_mean, a_std)
+            total_loss, loss_parts = train_module(
+                text_f,
+                text_f_c,
+                a_mean,
+                a_std,
+                teacher_positives,
+            )
 
         if args.lr_warmup_steps > 0:
             lr_scale = min(iteration / args.lr_warmup_steps, 1.0)

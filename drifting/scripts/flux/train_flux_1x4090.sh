@@ -32,11 +32,20 @@ LAMBDA_ANCHOR_VALUE="${LAMBDA_ANCHOR:-0.05}"
 FEATURE_NOISE_VALUE="${FEATURE_NOISE:-0.1}"
 POOL_TOKENS_VALUE="${POOL_TOKENS:-64}"
 SAMPLES_PER_CONDITION_VALUE="${SAMPLES_PER_CONDITION:-1}"
+TEACHER_POSITIVE_DIR_VALUE="${TEACHER_POSITIVE_DIR:-}"
+TEACHER_POSITIVE_COUNT_VALUE="${TEACHER_POSITIVE_COUNT:-3}"
 AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
 LOG_PREFIX_VALUE="${LOG_PREFIX:-}"
 AUTO_RESUME_ARGS=()
 if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
   AUTO_RESUME_ARGS=(--no-auto-resume)
+fi
+TEACHER_POSITIVE_ARGS=()
+if [[ -n "${TEACHER_POSITIVE_DIR_VALUE}" ]]; then
+  TEACHER_POSITIVE_ARGS=(
+    --teacher-positive-dir "${TEACHER_POSITIVE_DIR_VALUE}"
+    --teacher-positive-count "${TEACHER_POSITIVE_COUNT_VALUE}"
+  )
 fi
 
 if ! command -v flock >/dev/null 2>&1; then
@@ -92,6 +101,8 @@ print_config "FEATURE_NOISE" "${FEATURE_NOISE_VALUE}"
 print_config "POOL_TOKENS" "${POOL_TOKENS_VALUE}"
 print_config "SAMPLES_PER_CONDITION" "${SAMPLES_PER_CONDITION_VALUE}"
 print_config "MODEL_SAMPLES_PER_GPU" "$((BATCH_SIZE_VALUE * SAMPLES_PER_CONDITION_VALUE))"
+print_config "TEACHER_POSITIVE_DIR" "${TEACHER_POSITIVE_DIR_VALUE:-disabled}"
+print_config "TEACHER_POSITIVE_COUNT" "${TEACHER_POSITIVE_COUNT_VALUE}"
 print_config "AUTO_RESUME" "${AUTO_RESUME_VALUE}"
 print_config "USE_ROPE" "1"
 print_config "AMP" "1"
@@ -124,6 +135,7 @@ python drifting/flux/train.py \
   --feature-noise "${FEATURE_NOISE_VALUE}" \
   --pool-tokens "${POOL_TOKENS_VALUE}" \
   --samples-per-condition "${SAMPLES_PER_CONDITION_VALUE}" \
+  "${TEACHER_POSITIVE_ARGS[@]}" \
   --use-rope \
   --amp \
   "${AUTO_RESUME_ARGS[@]}"

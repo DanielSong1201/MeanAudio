@@ -30,17 +30,23 @@ For conditional TFD, use multiple samples for each caption:
 
 ```text
 condition batch:          B captions
-samples per condition:    K student samples and K positive latent samples
+student samples:          K one-step samples per caption
+positive samples:         1 real AudioCaps sample + (K - 1) generated samples
 teacher features:         B x K x tokens x hidden_dim
 ```
 
 Drifting and anchor neighborhoods are computed independently inside each
 caption group, then averaged across captions. This prevents unrelated captions
 in the same data-loader batch from becoming each other's positive or repulsion
-samples. When `K > 1`, each positive is an independent sample from the
-caption's stored VAE posterior. `BATCH_SIZE=1` and
-`SAMPLES_PER_CONDITION=4` keep four model samples per GPU while matching the
-paper's four-samples-per-condition setup.
+samples. For the paper-aligned `K=4` experiment, one positive is sampled from
+the caption's stored AudioCaps VAE posterior and the other three are generated
+offline by `meanaudio_l_full.pth` with 25-step MeanFlow and CFG 6. The generated
+normalized VAE latents are cached by dataset index, so training does not run
+the 25-step generator inside every optimization step.
+
+`BATCH_SIZE=1`, `SAMPLES_PER_CONDITION=4`, and
+`TEACHER_POSITIVE_COUNT=3` therefore give four student samples and four
+prompt-matched positives for each caption.
 
 where:
 
@@ -58,10 +64,12 @@ joint_3,fused_3,fused_7
 
 ```text
 drifting/flux/
+  build_teacher_positive_bank.py
   train.py
   test.py
   README.md
 drifting/scripts/flux/
+  build_teacher_positive_bank_4gpu.sh
   train_flux_1x4090.sh
   train_flux_2x4090.sh
   test_flux.sh
@@ -210,13 +218,49 @@ bash drifting/scripts/flux/sweeps/sweep_flux_4gpu_lr5e5_tfd100_anchor1_flow01_20
 ```
 
 This uses `lr=5e-5`, `tfd=100`, `anchor=1`, `flow=0.1`, 500 warmup
-iterations, and four student/positive samples for each caption. After training,
-it evaluates the same final EMA checkpoint once without external CFG (one
-network forward) and once with `CFG=4.5` (two network forwards). Disable the
-final comparison with `RUN_CFG_COMPARISON=0`, or run it separately:
+iterations, four student samples, and `1 real + 3 MeanAudio-L-generated`
+positives for each caption.
+
+Before training, the sweep builds or resumes this bank:
+
+```text
+data/audiocaps/train-teacher-positives-meanaudio-l-full-25step-cfg6/
+```
+
+Place the checkpoint at `weights/meanaudio_l_full.pth`. Its source is:
+
+```text
+https://huggingface.co/AndreasXi/MeanAudio/resolve/main/meanaudio_l_full.pth
+```
+
+Override it with `TEACHER_POSITIVE_WEIGHTS=/path/to/meanaudio_l_full.pth`.
+This variable is intentionally separate from `TEACHER_WEIGHTS`, which still
+selects the frozen FluxAudio feature teacher used by the training loss.
+
+To build the bank independently:
 
 ```bash
-EXP_ID=flux_lr5e5_tfd100_anchor1_flow01_cond4_warmup500_200k_4gpu \
+bash drifting/scripts/flux/build_teacher_positive_bank_4gpu.sh
+```
+
+Each `<dataset_index>.npz` contains three FP16 normalized latent tensors under
+`latents_normalized`; `complete.json` is written only after every training item
+exists. Existing item files are skipped, so interrupted generation is
+resumable. To train from an already completed bank without invoking the
+generator:
+
+```bash
+PREPARE_TEACHER_POSITIVES=0 \
+bash drifting/scripts/flux/sweeps/sweep_flux_4gpu_lr5e5_tfd100_anchor1_flow01_200k.sh
+```
+
+After training, the sweep evaluates the same final EMA checkpoint once without
+external CFG (one network forward) and once with `CFG=4.5` (two network
+forwards). Disable the final comparison with `RUN_CFG_COMPARISON=0`, or run it
+separately:
+
+```bash
+EXP_ID=flux_lr5e5_tfd100_anchor1_flow01_hybridpos4_warmup500_200k_4gpu \
 bash drifting/scripts/flux/compare_cfg_one_forward.sh
 ```
 
