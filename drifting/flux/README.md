@@ -312,38 +312,38 @@ for the NCCL process group.
 
 ## Eval-resume smoke test
 
-Use an existing iteration-10000 checkpoint to exercise the complete
-`19999 -> 20000 eval -> 20001..20100` control flow without modifying the
-source experiment:
+Use the existing iteration-10000 checkpoints from both retained experiments to
+exercise the complete `19500 -> 19501..19999 -> 20000 eval -> 20001..20100`
+control flow in
+parallel without modifying either source experiment:
 
 ```bash
-bash drifting/scripts/flux/test_eval_resume_2gpu.sh
+bash drifting/scripts/flux/test_eval_resume_parallel_2x2gpu.sh
 ```
 
-The script copies the source raw/EMA checkpoints into a timestamped test
-experiment under `exps/drifting_flux_resume_smoke/`, renames the copy to
-iteration 19999, runs a two-GPU job through iteration 20100, and writes eval
-artifacts under `exps/drifting_flux_eval_resume_smoke/`. It fails unless
-`metrics.csv` contains iterations 20000 through 20100, the train log contains
-`TRAIN_RESUME_AFTER_EVAL iteration=20000`, and both eval logs exist.
-Only weight and EMA files are copied, so the smoke test intentionally starts
-with a fresh optimizer and must not be interpreted as a valid continuation
-experiment.
+The script launches `tfd1` on GPUs `0,1` and `tfd100` on GPUs `2,3`, giving two
+independent two-rank DDP jobs and two fixed-position tqdm bars. Each source
+raw/EMA checkpoint is copied into its own timestamped test experiment under
+`exps/drifting_flux_resume_smoke/` and renamed to iteration 19500. Each job
+trains through iterations 19501–19999 before entering eval at 20000. Eval
+artifacts are isolated under `exps/drifting_flux_eval_resume_smoke/`.
 
-The default source is the two-GPU `tfd1` experiment. Select the other retained
-experiment with:
+Both jobs must contain every metrics row from 19501 through 20100, their own
+`TRAIN_RESUME_AFTER_EVAL iteration=20000` marker, and complete eval logs.
+Only weight and EMA files are copied, so both smoke jobs intentionally start
+with fresh optimizers and must not be interpreted as valid continuation
+experiments.
 
-```bash
-TEST_VARIANT=tfd100 bash drifting/scripts/flux/test_eval_resume_2gpu.sh
-```
-
-For any other source name or location:
+Override GPU pairs or source experiment names when needed:
 
 ```bash
-SOURCE_EXP_ID=<existing-exp-id> \
+TFD1_GPUS=0,2 \
+TFD100_GPUS=1,3 \
+TFD1_SOURCE_EXP_ID=<existing-tfd1-exp-id> \
+TFD100_SOURCE_EXP_ID=<existing-tfd100-exp-id> \
 SOURCE_OUTPUT_ROOT=<training-output-root> \
 SOURCE_ITERATION=10000 \
-bash drifting/scripts/flux/test_eval_resume_2gpu.sh
+bash drifting/scripts/flux/test_eval_resume_parallel_2x2gpu.sh
 ```
 
 ## Tests
