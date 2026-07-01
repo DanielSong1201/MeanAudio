@@ -281,12 +281,14 @@ def generate_audio_from_precomputed_conditions(args: argparse.Namespace, device:
     tqdm_position = int(os.environ.get("EVAL_TQDM_POSITION", os.environ.get("TQDM_POSITION", "0")))
     tqdm_desc = os.environ.get("EVAL_TQDM_DESC", "generate-audio")
     tqdm_leave = os.environ.get("EVAL_TQDM_LEAVE", "0") == "1"
+    tqdm_disable = os.environ.get("EVAL_TQDM_DISABLE", "0") == "1"
     for idx in tqdm(
         range(len(rows)),
         desc=tqdm_desc,
         dynamic_ncols=True,
         position=tqdm_position,
         leave=tqdm_leave,
+        disable=tqdm_disable,
     ):
         text_f, text_f_c = _load_eval_condition(args.eval_npz_dir, idx, device=device, dtype=dtype)
         x0 = torch.randn(

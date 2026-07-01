@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../../.."
 
-export EVAL_CONSOLE_OUTPUT="${EVAL_CONSOLE_OUTPUT:-0}"
+export EVAL_CONSOLE_OUTPUT=0
 export EVAL_FAILURE_FATAL="${EVAL_FAILURE_FATAL:-0}"
 export DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-180}"
 

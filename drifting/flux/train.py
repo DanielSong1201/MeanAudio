@@ -869,7 +869,6 @@ def main() -> None:
         )
     tqdm_position = int(os.environ.get("TQDM_POSITION", "0"))
     tqdm_desc = os.environ.get("TQDM_DESC", "flux-drifting-train")
-    eval_console_output = os.environ.get("EVAL_CONSOLE_OUTPUT", "1") == "1"
     eval_failure_fatal = os.environ.get("EVAL_FAILURE_FATAL", "0") == "1"
     if os.environ.get("QUIET_CONSOLE_AFTER_TQDM", "0") == "1":
         disable_console_logging(logger)
@@ -982,7 +981,7 @@ def main() -> None:
             dist.barrier()
 
         if is_main and should_eval:
-            console_states = [] if eval_console_output else suspend_console_logging(logger)
+            console_states = suspend_console_logging(logger)
             try:
                 eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
                 torch.save(student.state_dict(), eval_weight_path)
@@ -1000,7 +999,6 @@ def main() -> None:
                     teacher.to("cpu")
                     move_optimizer_state(optimizer, torch.device("cpu"))
                     empty_cuda_cache()
-                progress.clear()
                 try:
                     try:
                         run_checkpoint_evaluation(
@@ -1015,7 +1013,7 @@ def main() -> None:
                             use_rope=args.use_rope,
                             eval_metrics_path=eval_metrics_path,
                             logger=logger,
-                            stream_output=eval_console_output,
+                            stream_output=False,
                         )
                     except Exception:
                         logger.exception(
@@ -1037,7 +1035,7 @@ def main() -> None:
                         empty_cuda_cache()
             finally:
                 restore_console_logging(console_states)
-                progress.refresh()
+                progress.unpause()
 
         if distributed and should_eval:
             dist.barrier()

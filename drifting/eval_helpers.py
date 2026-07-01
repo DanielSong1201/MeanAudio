@@ -155,6 +155,17 @@ def _run_eval_subprocess(
     stream_output: bool,
     stream_prefix: str,
 ) -> int:
+    if not stream_output:
+        with driver_log.open("w") as log_file:
+            process = subprocess.run(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=env,
+                check=False,
+            )
+        return process.returncode
+
     with driver_log.open("w") as log_file:
         process = subprocess.Popen(
             cmd,
@@ -245,6 +256,7 @@ def run_checkpoint_evaluation(
             "EVAL_TQDM_DESC": f"[GPU{eval_cuda_visible_devices}] eval",
             "EVAL_TQDM_POSITION": eval_tqdm_position,
             "EVAL_TQDM_LEAVE": "0",
+            "EVAL_TQDM_DISABLE": "1" if not stream_output else "0",
             "PYTHON": sys.executable,
             "TEST_ENTRYPOINT": str(eval_entrypoint),
             "MODEL_PATH": str(checkpoint_path),

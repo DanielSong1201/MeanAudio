@@ -138,6 +138,11 @@ Training-time eval uses the EMA checkpoint by default when EMA is enabled. Run
 `python drifting/flux/train.py ... --eval-raw` if you need eval on raw student
 weights instead.
 
+Periodic eval is terminal-silent: all shell, generation, and benchmark output
+is redirected to `eval_driver.log` or `evaluate.log`. The training tqdm bars
+remain in place while eval runs and resume naturally afterward; eval time is
+excluded from the displayed training speed and ETA.
+
 ## Train
 
 From the repository root:
