@@ -834,7 +834,11 @@ def main() -> None:
     freeze_module(teacher)
     student.train()
     ema_device = torch.device(args.ema_device if args.ema_device == "cpu" else device)
-    ema = ExponentialMovingAverage(student, decay=args.ema_decay, device=ema_device) if args.ema else None
+    ema = (
+        ExponentialMovingAverage(student, decay=args.ema_decay, device=ema_device)
+        if args.ema and is_main
+        else None
+    )
     if ema is not None:
         if resume_state is not None and resume_state.get("ema") is not None:
             logger.info("Restoring EMA state from full training checkpoint.")
@@ -847,13 +851,16 @@ def main() -> None:
             else:
                 logger.warning("EMA checkpoint not found at %s; initializing EMA from resumed student weights.", ema_resume_path)
         logger.info(
-            "EMA enabled: decay=%.6f start=%d update_interval=%d device=%s eval_use_ema=%s",
+            "EMA enabled on rank0 only: decay=%.6f start=%d update_interval=%d "
+            "device=%s eval_use_ema=%s",
             args.ema_decay,
             args.ema_start,
             args.ema_update_interval,
             ema_device,
             args.eval_use_ema,
         )
+    elif args.ema and not is_main:
+        logger.info("EMA disabled on non-main rank; rank0 owns the only EMA copy.")
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     if resume_state is not None:

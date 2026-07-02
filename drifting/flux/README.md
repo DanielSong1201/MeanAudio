@@ -152,6 +152,14 @@ the other ranks wait at a barrier. A shared
 two parallel experiments, preventing rank1 from entering a new all-reduce
 while rank0 is serializing a checkpoint.
 
+Only rank0 maintains the CPU EMA used for checkpointing and evaluation.
+Non-main ranks no longer copy the full student state from CUDA to CPU every
+iteration. Distributed launchers also use a high-priority NCCL stream and
+default to `NCCL_P2P_DISABLE=1`, using shared-memory transport instead of
+direct PCIe GPU-to-GPU access on the single-node 4090 server. Set
+`NCCL_P2P_DISABLE=0` explicitly to benchmark the native topology after
+stability is established.
+
 ## Train
 
 From the repository root:
