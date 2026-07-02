@@ -1,7 +1,11 @@
-# Resonate architecture, data/positive interfaces, validation, and downloads.
-# Install matching CUDA-specific torch and torchaudio wheels first.
-torch>=2.5.1,<3.0
-torchaudio>=2.5.1,<3.0
+# Resonate server environment: PyTorch 2.5.1 with CUDA 12.4.
+# The +cu124 tags force pip to select the matching wheels from the PyTorch
+# index while the remaining dependencies continue to resolve from PyPI.
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+torchaudio==2.5.1+cu124
 einops>=0.7,<1.0
 numpy>=1.24,<2.1
 transformers>=4.46,<5.0

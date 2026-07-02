@@ -11,7 +11,8 @@ The architecture is aligned to upstream
 
 Environment installation and checkpoint download instructions are in
 [`INSTALL.md`](INSTALL.md). The current Python dependencies are in
-[`requirements.txt`](requirements.txt).
+[`requirements.txt`](requirements.txt), including the server-specific CUDA
+12.4 pins for torch, torchvision, and torchaudio.
 
 ## Phase 0-3 status
 

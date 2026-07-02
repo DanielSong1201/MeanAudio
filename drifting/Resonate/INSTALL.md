@@ -25,7 +25,7 @@ conda activate resonate-tfd
 python -m pip install --upgrade pip
 ```
 
-## 2. Install CUDA PyTorch
+## 2. Install the CUDA 12.4 environment
 
 First inspect the server driver:
 
@@ -33,34 +33,65 @@ First inspect the server driver:
 nvidia-smi
 ```
 
-For a server compatible with CUDA 12.1 wheels:
+The existing `requirements.txt` is pinned to the server's CUDA configuration:
 
 ```bash
 python -m pip install \
-  torch==2.5.1 torchaudio==2.5.1 \
-  --index-url https://download.pytorch.org/whl/cu121
+  -r drifting/Resonate/requirements.txt
 ```
 
-If the existing server environment already has PyTorch 2.5.1 or newer, keep
-that installation instead of reinstalling it.
+It installs:
+
+```text
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+torchaudio==2.5.1+cu124
+```
+
+Do not combine PyTorch 2.5.1 with `torchvision 0.27.1`. That torchvision
+release requires a different torch ABI.
+
+### Repair the currently conflicting environment
+
+If the environment already contains `torch 2.5.1+cu124`,
+`torchaudio 2.5.1+cu124`, and the incompatible `torchvision 0.27.1`, repair
+all three together:
+
+```bash
+python -m pip uninstall -y torch torchvision torchaudio
+
+python -m pip install --no-cache-dir \
+  -r drifting/Resonate/requirements.txt
+```
+
+Reinstalling the three packages in one command prevents pip from retaining a
+binary-incompatible torchvision build.
 
 Verify CUDA access:
 
 ```bash
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+python -c "import torch, torchvision, torchaudio; print('torch', torch.__version__); print('torchvision', torchvision.__version__); print('torchaudio', torchaudio.__version__); print('cuda', torch.version.cuda); print('available', torch.cuda.is_available())"
 ```
 
-The second line should be `True` for later GPU work. Phase 0-3's tiny gradient
-contract can also run on CPU.
+Expected versions are:
 
-## 3. Install the current Resonate TFD dependencies
+```text
+torch 2.5.1+cu124
+torchvision 0.20.1+cu124
+torchaudio 2.5.1+cu124
+cuda 12.4
+available True
+```
+
+## 3. Install this repository
 
 ```bash
-python -m pip install -r drifting/Resonate/requirements.txt
 python -m pip install -e . --no-deps
+python -m pip check
 ```
 
 `--no-deps` avoids installing MeanAudio's unrelated full dependency stack.
+`pip check` must finish without a torch/torchvision/torchaudio conflict.
 
 ## 4. Download the released Resonate checkpoint
 
