@@ -258,6 +258,83 @@ torchrun --standalone --nproc_per_node=4 \
   drifting/Resonate/build_teacher_positive_bank.py
 ```
 
+### Custom-GPU positive launcher
+
+`drifting/scripts/resonate/build_teacher_positive_bank.sh` wraps the same
+Python interface and automatically derives the process count from
+`CUDA_VISIBLE_DEVICES`.
+
+One GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+bash drifting/scripts/resonate/build_teacher_positive_bank.sh
+```
+
+Two selected GPUs:
+
+```bash
+CUDA_VISIBLE_DEVICES=1,3 \
+bash drifting/scripts/resonate/build_teacher_positive_bank.sh
+```
+
+Four GPUs:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+bash drifting/scripts/resonate/build_teacher_positive_bank.sh
+```
+
+The optional `NPROC_PER_NODE` value must match the number of visible GPU IDs;
+the launcher rejects mismatches instead of silently oversubscribing a card.
+
+Common overrides:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+NPROC_PER_NODE=2 \
+POSITIVES_PER_CONDITION=3 \
+NUM_STEPS=25 \
+CFG_STRENGTH=4.5 \
+LIMIT=100 \
+OUTPUT_DIR=data/audiocaps_resonate/positive-test-100 \
+bash drifting/scripts/resonate/build_teacher_positive_bank.sh
+```
+
+Supported environment variables include:
+
+```text
+CUDA_VISIBLE_DEVICES
+NPROC_PER_NODE
+TSV
+NPZ_DIR
+OUTPUT_DIR
+TEACHER_WEIGHTS
+POSITIVES_PER_CONDITION
+NUM_STEPS
+CFG_STRENGTH
+SEED
+STORAGE_DTYPE
+LOG_LEVEL
+AMP
+LIMIT
+OVERWRITE
+ALLOW_INCOMPLETE_DATA
+DDP_TIMEOUT_MINUTES
+NCCL_P2P_DISABLE
+```
+
+`AMP=0` selects full precision. `OVERWRITE=0` is the safe default and resumes
+by skipping existing files. The output directory contains a non-blocking
+`.positive-bank.lock`, preventing two launchers from generating the same bank
+simultaneously. To inspect the resolved command without loading a model:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,2,3 \
+DRY_RUN=1 \
+bash drifting/scripts/resonate/build_teacher_positive_bank.sh
+```
+
 These are direct Python/CLI interfaces, not phase-specific sweep or launch
 scripts. Both operations support deterministic seeds, distributed sharding,
 atomic files, completion markers, resume-by-existing-file, `--overwrite`, and
