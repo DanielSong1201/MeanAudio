@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import json
 import logging
 import os
 import random
 import sys
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,50 @@ def load_training_state(path: Path, map_location: str | torch.device) -> dict[st
     return state
 
 
+def to_cpu_state(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return type(value)((key, to_cpu_state(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return [to_cpu_state(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(to_cpu_state(item) for item in value)
+    return value
+
+
+def module_state_dict_to_cpu(module: nn.Module) -> dict[str, torch.Tensor]:
+    state_dict = module.state_dict()
+    cpu_state_dict = type(state_dict)(
+        (key, value.detach().cpu())
+        for key, value in state_dict.items()
+    )
+    if hasattr(state_dict, "_metadata"):
+        cpu_state_dict._metadata = state_dict._metadata
+    return cpu_state_dict
+
+
+def atomic_torch_save(payload: Any, path: Path) -> None:
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        torch.save(payload, temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+@contextmanager
+def checkpoint_io_lock(output_root: Path):
+    output_root.mkdir(parents=True, exist_ok=True)
+    lock_path = output_root / ".checkpoint_io.lock"
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def save_training_state(
     path: Path,
     *,
@@ -59,20 +105,15 @@ def save_training_state(
     ema: ExponentialMovingAverage | None,
     sampler_epoch: int,
 ) -> None:
-    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     state = {
         "version": 1,
         "iteration": iteration,
-        "student": student.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        "student": module_state_dict_to_cpu(student),
+        "optimizer": to_cpu_state(optimizer.state_dict()),
         "ema": None if ema is None else ema.state_dict(),
         "sampler_epoch": sampler_epoch,
     }
-    try:
-        torch.save(state, temporary_path)
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    atomic_torch_save(state, path)
 
 
 class AudioCapsNpzDataset(Dataset):
@@ -678,12 +719,12 @@ def main() -> None:
                     state_metadata = load_training_state(training_state_path, "cpu")
                     state_iteration = int(state_metadata["iteration"])
                     del state_metadata
-                    if latest_weights is None or state_iteration >= latest_weights[0]:
-                        latest = (state_iteration, training_state_path, "full")
-                    else:
+                    latest = (state_iteration, training_state_path, "full")
+                    if latest_weights is not None and latest_weights[0] > state_iteration:
                         logger.warning(
                             "Training state at iteration %d is older than weight checkpoint %d; "
-                            "falling back to the newer weights-only checkpoint.",
+                            "ignoring the orphan weights-only checkpoint and resuming from the "
+                            "latest complete optimizer/EMA state.",
                             state_iteration,
                             latest_weights[0],
                         )
@@ -965,23 +1006,32 @@ def main() -> None:
                 }
             )
 
-        if is_main and iteration % args.save_interval == 0:
-            weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
-            torch.save(student.state_dict(), weight_path)
-            logger.info("Saved weights to %s", weight_path)
-            if ema is not None:
-                ema_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
-                torch.save(ema.state_dict(), ema_weight_path)
-                logger.info("Saved EMA weights to %s", ema_weight_path)
-            save_training_state(
-                training_state_path,
-                iteration=iteration,
-                student=student,
-                optimizer=optimizer,
-                ema=ema,
-                sampler_epoch=sampler_epoch,
-            )
-            logger.info("Saved resumable training state to %s", training_state_path)
+        should_save = iteration % args.save_interval == 0
+        if distributed and should_save:
+            dist.barrier()
+        if is_main and should_save:
+            logger.info("CHECKPOINT_SAVE_START iteration=%d", iteration)
+            with checkpoint_io_lock(args.output_root) as lock_path:
+                logger.info("Acquired checkpoint I/O lock: %s", lock_path)
+                weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
+                atomic_torch_save(module_state_dict_to_cpu(student), weight_path)
+                logger.info("Saved weights to %s", weight_path)
+                if ema is not None:
+                    ema_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
+                    atomic_torch_save(ema.state_dict(), ema_weight_path)
+                    logger.info("Saved EMA weights to %s", ema_weight_path)
+                save_training_state(
+                    training_state_path,
+                    iteration=iteration,
+                    student=student,
+                    optimizer=optimizer,
+                    ema=ema,
+                    sampler_epoch=sampler_epoch,
+                )
+                logger.info("Saved resumable training state to %s", training_state_path)
+            logger.info("CHECKPOINT_SAVE_DONE iteration=%d", iteration)
+        if distributed and should_save:
+            dist.barrier()
 
         should_eval = args.eval_interval > 0 and iteration % args.eval_interval == 0
         if distributed and should_eval:
@@ -993,12 +1043,22 @@ def main() -> None:
 
             if is_main:
                 eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
-                torch.save(student.state_dict(), eval_weight_path)
-                logger.info("Saved eval raw weights to %s", eval_weight_path)
+                if not eval_weight_path.exists():
+                    with checkpoint_io_lock(args.output_root):
+                        atomic_torch_save(
+                            module_state_dict_to_cpu(student),
+                            eval_weight_path,
+                        )
+                    logger.info("Saved eval raw weights to %s", eval_weight_path)
                 if ema is not None:
                     ema_eval_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
-                    torch.save(ema.state_dict(), ema_eval_weight_path)
-                    logger.info("Saved eval EMA weights to %s", ema_eval_weight_path)
+                    if not ema_eval_weight_path.exists():
+                        with checkpoint_io_lock(args.output_root):
+                            atomic_torch_save(
+                                ema.state_dict(),
+                                ema_eval_weight_path,
+                            )
+                        logger.info("Saved eval EMA weights to %s", ema_eval_weight_path)
                     if args.eval_use_ema:
                         eval_weight_path = ema_eval_weight_path
 
@@ -1075,24 +1135,30 @@ def main() -> None:
 
     progress.close()
 
+    if distributed:
+        dist.barrier()
     if is_main:
-        last_path = output_dir / f"{args.exp_id}_last.pth"
-        torch.save(student.state_dict(), last_path)
-        logger.info("Saved final weights to %s", last_path)
-        if ema is not None:
-            ema_last_path = output_dir / f"{args.exp_id}_ema_last.pth"
-            torch.save(ema.state_dict(), ema_last_path)
-            logger.info("Saved final EMA weights to %s", ema_last_path)
-        save_training_state(
-            training_state_path,
-            iteration=last_completed_iteration,
-            student=student,
-            optimizer=optimizer,
-            ema=ema,
-            sampler_epoch=sampler_epoch,
-        )
-        logger.info("Saved final resumable training state to %s", training_state_path)
+        with checkpoint_io_lock(args.output_root) as lock_path:
+            logger.info("Acquired checkpoint I/O lock for final save: %s", lock_path)
+            last_path = output_dir / f"{args.exp_id}_last.pth"
+            atomic_torch_save(module_state_dict_to_cpu(student), last_path)
+            logger.info("Saved final weights to %s", last_path)
+            if ema is not None:
+                ema_last_path = output_dir / f"{args.exp_id}_ema_last.pth"
+                atomic_torch_save(ema.state_dict(), ema_last_path)
+                logger.info("Saved final EMA weights to %s", ema_last_path)
+            save_training_state(
+                training_state_path,
+                iteration=last_completed_iteration,
+                student=student,
+                optimizer=optimizer,
+                ema=ema,
+                sampler_epoch=sampler_epoch,
+            )
+            logger.info("Saved final resumable training state to %s", training_state_path)
         logger.info("FluxAudio drifting training completed.")
+    if distributed:
+        dist.barrier()
     cleanup_distributed(distributed)
 
 

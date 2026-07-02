@@ -5,6 +5,8 @@ cd "$(dirname "$0")/../../.."
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-180}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::FutureWarning}"
 
 NPROC_PER_NODE_VALUE="${NPROC_PER_NODE:-4}"
 OUTPUT_DIR_VALUE="${TEACHER_POSITIVE_DIR:-data/audiocaps/train-teacher-positives-meanaudio-l-full-25step-cfg6}"

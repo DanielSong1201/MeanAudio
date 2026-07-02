@@ -145,6 +145,13 @@ excluded from the displayed training speed and ETA. To free eval memory safely,
 rank0 moves only the frozen teacher and optimizer state to CPU; the trainable
 student and its DDP reducer remain on CUDA and are never rebuilt across eval.
 
+Periodic and final checkpoints are synchronized across all DDP ranks. Rank0
+first copies CUDA model/optimizer state to CPU, then writes atomically while
+the other ranks wait at a barrier. A shared
+`exps/drifting_flux/.checkpoint_io.lock` serializes checkpoint writes from the
+two parallel experiments, preventing rank1 from entering a new all-reduce
+while rank0 is serializing a checkpoint.
+
 ## Train
 
 From the repository root:
