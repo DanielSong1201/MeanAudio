@@ -1,4 +1,4 @@
-# Resonate TFD Phase 0-3 Installation
+# Resonate TFD Installation
 
 ## Environment
 
@@ -10,9 +10,10 @@ Phase 0-3 has been designed for:
 - PyTorch 2.5.1 or newer
 - CUDA-enabled PyTorch
 
-The current phase only constructs the Resonate architecture, loads its
-checkpoint, and validates the TFD feature-gradient contract. It does not need
-the full Resonate GRPO/RL dependency stack.
+The current implementation constructs the Resonate architecture, validates
+the TFD feature-gradient contract, preprocesses AudioCaps, and generates the
+offline teacher-positive bank. It does not need the full Resonate GRPO/RL
+dependency stack.
 
 ## 1. Create the Conda environment
 
@@ -36,7 +37,7 @@ For a server compatible with CUDA 12.1 wheels:
 
 ```bash
 python -m pip install \
-  torch==2.5.1 \
+  torch==2.5.1 torchaudio==2.5.1 \
   --index-url https://download.pytorch.org/whl/cu121
 ```
 
@@ -52,16 +53,14 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 The second line should be `True` for later GPU work. Phase 0-3's tiny gradient
 contract can also run on CPU.
 
-## 3. Install the Phase 0-3 dependencies
+## 3. Install the current Resonate TFD dependencies
 
 ```bash
 python -m pip install -r drifting/Resonate/requirements.txt
 python -m pip install -e . --no-deps
 ```
 
-`--no-deps` avoids installing MeanAudio's full audio-generation dependency
-stack during this phase. Later data preprocessing and 44.1 kHz evaluation
-phases will extend the requirements.
+`--no-deps` avoids installing MeanAudio's unrelated full dependency stack.
 
 ## 4. Download the released Resonate checkpoint
 
@@ -95,6 +94,20 @@ This produces:
 
 ```text
 weights/Resonate_PT.pth
+```
+
+The AudioCaps preprocessing interface additionally needs the released 44.1 kHz
+VAE:
+
+```bash
+MODEL_FILE=v1-44.pth \
+bash drifting/scripts/resonate/download_resonate_model.sh
+```
+
+This produces:
+
+```text
+weights/v1-44.pth
 ```
 
 To use another storage root:

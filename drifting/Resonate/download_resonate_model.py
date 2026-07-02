@@ -8,17 +8,17 @@ from huggingface_hub import hf_hub_download
 
 
 REPOSITORY_ID = "AndreasXi/Resonate"
-RELEASED_MODELS = ("Resonate_GRPO.pth", "Resonate_PT.pth")
+RELEASED_ASSETS = ("Resonate_GRPO.pth", "Resonate_PT.pth", "v1-44.pth")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download one released Resonate checkpoint into the local weights directory."
+        description="Download one released Resonate checkpoint or VAE asset."
     )
     parser.add_argument("--repo-id", default=REPOSITORY_ID)
     parser.add_argument(
         "--model-file",
-        choices=RELEASED_MODELS,
+        choices=RELEASED_ASSETS,
         default="Resonate_GRPO.pth",
     )
     parser.add_argument("--weights-dir", type=Path, default=Path("weights"))

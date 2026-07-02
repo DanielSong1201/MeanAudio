@@ -1,6 +1,13 @@
-# Phase 0-3 only: Resonate architecture, TFD feature extraction, validation,
-# and checkpoint download. Install the CUDA-specific PyTorch wheel first.
+# Resonate architecture, data/positive interfaces, validation, and downloads.
+# Install matching CUDA-specific torch and torchaudio wheels first.
 torch>=2.5.1,<3.0
+torchaudio>=2.5.1,<3.0
 einops>=0.7,<1.0
+numpy>=1.24,<2.1
+transformers>=4.46,<5.0
+sentencepiece>=0.2,<1.0
+tqdm>=4.66,<5.0
+omegaconf>=2.3,<3.0
+soundfile>=0.12,<1.0
 huggingface_hub>=0.26,<2.0
 hf_xet>=1.1,<2.0

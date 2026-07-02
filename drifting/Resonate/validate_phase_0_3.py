@@ -24,8 +24,9 @@ from drifting.Resonate.model import (
 
 FLUX_BASELINE_COMMIT = "a7f5239"
 FLUX_PROTECTED_PATHS = (
-    "drifting/flux",
-    "drifting/scripts/flux",
+    "drifting/flux/train.py",
+    "drifting/flux/test.py",
+    "drifting/flux/build_teacher_positive_bank.py",
     "drifting/eval_helpers.py",
     "meanaudio/model/networks.py",
     "meanaudio/model/teacher_feature_drifting.py",
