@@ -28,6 +28,7 @@ from drifting.Resonate.data import (
     resolve_audiocaps_records,
     write_processed_manifest,
 )
+from drifting.Resonate.progress import setup_tqdm_logger
 from meanaudio.ext.autoencoder.vae import get_my_vae
 from meanaudio.ext.mel_converter import get_mel_converter
 
@@ -147,6 +148,11 @@ def load_resonate_vae(path: Path, device: torch.device) -> torch.nn.Module:
 def prepare_audiocaps(args: argparse.Namespace) -> None:
     distributed, rank, _, world_size, device = setup_distributed(args.device)
     is_main = rank == 0
+    logger = setup_tqdm_logger(
+        "drifting.resonate.prepare",
+        enabled=is_main,
+        level=args.log_level,
+    )
     records, manifest, audio_dir, missing_audio = resolve_audiocaps_records(
         dataset_root=args.dataset_root,
         split=args.split,
@@ -190,17 +196,17 @@ def prepare_audiocaps(args: argparse.Namespace) -> None:
                 "Use a different --output-root or pass --overwrite."
             )
     if is_main:
-        print(
+        logger.info(
             f"[data] split={args.split} records={len(records)} "
             f"missing_audio_skipped={missing_audio}"
         )
-        print(f"[data] manifest={manifest}")
-        print(f"[data] audio_dir={audio_dir}")
-        print(f"[data] output={output_dir}")
+        logger.info("[data] manifest=%s", manifest)
+        logger.info("[data] audio_dir=%s", audio_dir)
+        logger.info("[data] output=%s", output_dir)
 
     if args.dry_run:
         if is_main:
-            print("[ok] dry-run discovery completed; model extraction was skipped")
+            logger.info("[ok] dry-run discovery completed; model extraction was skipped")
         if distributed:
             dist.destroy_process_group()
         return
@@ -218,12 +224,26 @@ def prepare_audiocaps(args: argparse.Namespace) -> None:
         for index in range(rank, len(records), world_size)
         if args.overwrite or not (output_dir / f"{index}.npz").is_file()
     ]
+    if is_main:
+        remaining_total = sum(
+            args.overwrite or not (output_dir / f"{index}.npz").is_file()
+            for index in range(len(records))
+        )
+        logger.info(
+            "[data] remaining=%d existing=%d total=%d",
+            remaining_total,
+            len(records) - remaining_total,
+            len(records),
+        )
     if not args.overwrite and all(
         (output_dir / f"{index}.npz").is_file() for index in range(len(records))
     ):
         if is_main:
             atomic_write_json(complete_path, config)
-            print(f"[ok] Resonate AudioCaps preprocessing already complete: {output_dir}")
+            logger.info(
+                "[ok] Resonate AudioCaps preprocessing already complete: %s",
+                output_dir,
+            )
         if distributed:
             dist.barrier()
             dist.destroy_process_group()
@@ -256,6 +276,7 @@ def prepare_audiocaps(args: argparse.Namespace) -> None:
         desc=f"resonate-preprocess-{args.split}-rank{rank}",
         disable=not is_main,
         dynamic_ncols=True,
+        unit="batch",
     )
     with torch.inference_mode():
         for batch in progress:
@@ -317,7 +338,7 @@ def prepare_audiocaps(args: argparse.Namespace) -> None:
                 f"first indices={missing_outputs[:20]}"
             )
         atomic_write_json(complete_path, config)
-        print(f"[ok] Resonate AudioCaps preprocessing complete: {output_dir}")
+        logger.info("[ok] Resonate AudioCaps preprocessing complete: %s", output_dir)
     if distributed:
         dist.destroy_process_group()
 
@@ -354,6 +375,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+    )
     return parser.parse_args()
 
 

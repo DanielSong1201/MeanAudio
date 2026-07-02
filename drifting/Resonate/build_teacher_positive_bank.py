@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 from drifting.Resonate.config import RESONATE_CONFIG
 from drifting.Resonate.data import ResonateNpzDataset
 from drifting.Resonate.model import build_resonate_model, freeze_resonate_teacher
+from drifting.Resonate.progress import setup_tqdm_logger
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -105,6 +106,11 @@ def euler_sample(
 def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
     distributed, rank, _, world_size, device = setup_distributed(args.device)
     is_main = rank == 0
+    logger = setup_tqdm_logger(
+        "drifting.resonate.positives",
+        enabled=is_main,
+        level=args.log_level,
+    )
     if args.positives_per_condition < 1:
         raise ValueError("--positives-per-condition must be positive")
     if args.num_steps < 1:
@@ -157,8 +163,8 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(config_path, config)
         complete_path.unlink(missing_ok=True)
-        print(f"[positive-bank] output={args.output_dir}")
-        print(
+        logger.info("[positive-bank] output=%s", args.output_dir)
+        logger.info(
             f"[positive-bank] items={num_items} positives={args.positives_per_condition} "
             f"steps={args.num_steps} cfg={args.cfg_strength}"
         )
@@ -170,12 +176,26 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
         for index in range(rank, num_items, world_size)
         if args.overwrite or not (args.output_dir / f"{index}.npz").is_file()
     ]
+    if is_main:
+        remaining_total = sum(
+            args.overwrite or not (args.output_dir / f"{index}.npz").is_file()
+            for index in range(num_items)
+        )
+        logger.info(
+            "[positive-bank] remaining=%d existing=%d total=%d",
+            remaining_total,
+            num_items - remaining_total,
+            num_items,
+        )
     if not args.overwrite and all(
         (args.output_dir / f"{index}.npz").is_file() for index in range(num_items)
     ):
         if is_main:
             atomic_write_json(complete_path, config)
-            print(f"[ok] Resonate teacher-positive bank already complete: {args.output_dir}")
+            logger.info(
+                "[ok] Resonate teacher-positive bank already complete: %s",
+                args.output_dir,
+            )
         if distributed:
             dist.barrier()
             dist.destroy_process_group()
@@ -198,6 +218,7 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
         desc=f"resonate-positives-rank{rank}",
         disable=not is_main,
         dynamic_ncols=True,
+        unit="prompt",
     )
     with torch.inference_mode():
         for index in progress:
@@ -270,7 +291,7 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
                 f"first indices={missing_outputs[:20]}"
             )
         atomic_write_json(complete_path, config)
-        print(f"[ok] Resonate teacher-positive bank complete: {args.output_dir}")
+        logger.info("[ok] Resonate teacher-positive bank complete: %s", args.output_dir)
     if distributed:
         dist.destroy_process_group()
 
@@ -316,6 +337,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-incomplete-data", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+    )
     return parser.parse_args()
 
 

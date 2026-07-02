@@ -263,6 +263,199 @@ scripts. Both operations support deterministic seeds, distributed sharding,
 atomic files, completion markers, resume-by-existing-file, `--overwrite`, and
 small `--limit` runs.
 
+## tqdm and INFO behavior
+
+Both preprocessing and positive generation use the shared tqdm-aware logger in
+`drifting/Resonate/progress.py`.
+
+- Only rank0 displays a progress bar and INFO messages.
+- INFO messages are written through `tqdm.write()`, so they do not overwrite or
+  freeze the active progress bar.
+- Preprocessing reports progress in remaining batches.
+- Positive generation reports progress in remaining prompts.
+- Before starting, each command reports `remaining`, `existing`, and `total`.
+- Resuming therefore shows only work that still needs to be completed.
+- Non-main distributed ranks perform their shards without duplicating console
+  output.
+
+The default level is INFO. It can be changed without disabling tqdm:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python drifting/Resonate/build_teacher_positive_bank.py \
+  --log-level WARNING
+```
+
+## Single-GPU end-to-end data path
+
+The complete currently implemented path is:
+
+### 1. Raw AudioCaps
+
+```text
+drifting/data/AudioCaps_CVSSP/
+├── train/
+├── eval/
+└── test/
+```
+
+Each directory contains waveform files. Caption metadata is discovered from
+the source directory or from:
+
+```text
+data/audiocaps/train-memmap.tsv
+data/audiocaps/val-memmap.tsv
+data/audiocaps/test-memmap.tsv
+```
+
+### 2. Required weights
+
+```bash
+# Resonate-GRPO flow model used to generate positives.
+bash drifting/scripts/resonate/download_resonate_model.sh
+
+# Resonate 44.1 kHz VAE used to encode real AudioCaps waveforms.
+MODEL_FILE=v1-44.pth \
+bash drifting/scripts/resonate/download_resonate_model.sh
+```
+
+They are stored at:
+
+```text
+weights/Resonate_GRPO.pth
+weights/v1-44.pth
+```
+
+### 3. Validate source discovery
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python drifting/Resonate/prepare_audiocaps.py \
+  --split train \
+  --dry-run
+```
+
+This validates the symlink, caption manifest, audio IDs, and missing-audio
+count without loading the VAE or writing processed data.
+
+### 4. Preprocess all splits
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+
+for split in train eval test; do
+  python drifting/Resonate/prepare_audiocaps.py \
+    --split "${split}" \
+    --batch-size 4 \
+    --num-workers 4
+done
+```
+
+For each waveform, `prepare_audiocaps.py` performs:
+
+```text
+waveform
+  -> mono
+  -> resample/pad/crop to 44.1 kHz x 10 seconds
+  -> 128-bin log-mel
+  -> v1-44 VAE posterior mean/std
+```
+
+For each caption it performs:
+
+```text
+caption
+  -> google/flan-t5-large
+  -> text_features [77, 1024]
+  -> mean-pooled text_features_c [1024]
+```
+
+The resulting paths are:
+
+```text
+data/audiocaps_resonate/
+├── train.tsv
+├── train-npz-flant5-44k/
+│   ├── 0.npz
+│   ├── 1.npz
+│   ├── config.json
+│   └── complete.json
+├── eval.tsv
+├── eval-npz-flant5-44k/
+├── test.tsv
+└── test-npz-flant5-44k/
+```
+
+Each processed NPZ contains:
+
+```text
+mean                 [latent_tokens, 40]
+std                  [latent_tokens, 40]
+text_features        [77, 1024]
+text_features_c      [1024]
+```
+
+The path registry for future training is:
+
+```text
+config/data/resonate_flant5_44k.yaml
+```
+
+### 5. Generate three teacher positives
+
+After train preprocessing completes:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python drifting/Resonate/build_teacher_positive_bank.py \
+  --positives-per-condition 3 \
+  --num-steps 25 \
+  --cfg-strength 4.5
+```
+
+The generation path is:
+
+```text
+train NPZ text condition
+  -> repeat prompt condition three times
+  -> three independent Gaussian latent noises
+  -> frozen Resonate_GRPO.pth
+  -> 25 reverse-flow Euler steps with CFG 4.5
+  -> three normalized Resonate latents
+```
+
+Output:
+
+```text
+data/audiocaps_resonate/
+└── train-teacher-positives-resonate-grpo-25step-cfg4.5/
+    ├── 0.npz
+    ├── 1.npz
+    ├── config.json
+    └── complete.json
+```
+
+Each file contains:
+
+```text
+latents_normalized [3, latent_tokens, 40]
+```
+
+### 6. Four-positive training interface
+
+`ResonateNpzDataset` reads the real posterior and the three generated entries.
+The future training step will construct:
+
+```text
+sample(mean, std)                  -> 1 real positive
+latents_normalized from bank       -> 3 generated positives
+                                      ---------------------
+                                      4 positives per prompt
+```
+
+The data preparation and three-positive bank are implemented. The Resonate TFD
+training loop that consumes these four positives is the next unfinished stage.
+
 ## Phase 0-3 server validation
 
 After placing `Resonate_GRPO.pth` under `weights/`, run:
