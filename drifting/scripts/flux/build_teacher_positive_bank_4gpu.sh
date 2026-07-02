@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Prevent a fatal CUDA/NCCL worker from writing a large core.<pid> file.
+ulimit -c 0
+
 cd "$(dirname "$0")/../../.."
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
@@ -30,6 +33,7 @@ printf 'teacher_positive_config CFG_STRENGTH=%s\n' "${CFG_STRENGTH_VALUE}"
 printf 'teacher_positive_config SEED=%s\n' "${SEED_VALUE}"
 printf 'teacher_positive_config GPU_COUNT=%s\n' "${NPROC_PER_NODE_VALUE}"
 printf 'teacher_positive_config CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES}"
+printf 'teacher_positive_config CORE_DUMP_LIMIT=%s\n' "$(ulimit -c)"
 
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" \
   drifting/flux/build_teacher_positive_bank.py \

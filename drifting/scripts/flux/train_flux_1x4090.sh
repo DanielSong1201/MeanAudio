@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NCCL/CUDA fatal errors can terminate a worker with SIGABRT. Do not let the
+# kernel write multi-gigabyte core.<pid> files into the repository.
+ulimit -c 0
+
 cd "$(dirname "$0")/../../.."
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -73,6 +77,7 @@ print_config "OUTPUT_ROOT" "${OUTPUT_ROOT_VALUE}"
 print_config "TRAIN_LOCK" "${TRAIN_LOCK_PATH}"
 print_config "GPU_COUNT" "1"
 print_config "CUDA_VISIBLE_DEVICES" "${CUDA_VISIBLE_DEVICES}"
+print_config "CORE_DUMP_LIMIT" "$(ulimit -c)"
 print_config "TRAIN_SCRIPT" "drifting/scripts/flux/train_flux_1x4090.sh"
 print_config "TEACHER_WEIGHTS" "${TEACHER_WEIGHTS_VALUE}"
 print_config "STUDENT_INIT" "${STUDENT_INIT_VALUE}"

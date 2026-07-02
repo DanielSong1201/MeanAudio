@@ -18,6 +18,7 @@ docs/
 
 data/*
 !data/.gitkeep
+drifting/data/
 
 weights/*
 !weights/.gitkeep
@@ -25,6 +26,11 @@ weights/*
 weights_backup
 
 weights_shadow
+
+# Native crash dumps (for example, PyTorch/NCCL SIGABRT workers).
+core
+core.*
+*.core
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

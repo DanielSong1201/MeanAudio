@@ -160,6 +160,20 @@ direct PCIe GPU-to-GPU access on the single-node 4090 server. Set
 `NCCL_P2P_DISABLE=0` explicitly to benchmark the native topology after
 stability is established.
 
+### Core dump files
+
+The Flux launchers set `ulimit -c 0` before starting Python or `torchrun`.
+This prevents a fatal CUDA/NCCL worker from writing a potentially very large
+`core.<pid>` file into the repository. For example, `core.3135142` means that
+Linux wrote a native memory dump for process 3135142 after it received a fatal
+signal such as `SIGABRT`.
+
+Disabling the native core file does not suppress the Python, torchrun, or NCCL
+error output. `TORCH_NCCL_DUMP_ON_TIMEOUT=1` and the NCCL flight recorder remain
+enabled and continue to provide timeout diagnostics in the logs. Existing core
+files are not training checkpoints and may be removed after confirming that
+they are no longer needed for native debugging.
+
 ## Train
 
 From the repository root:

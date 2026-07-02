@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NCCL/CUDA fatal errors can terminate a worker with SIGABRT. Do not let the
+# kernel write multi-gigabyte core.<pid> files into the repository.
+ulimit -c 0
+
 cd "$(dirname "$0")/../../.."
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -74,6 +78,7 @@ printf 'train_config OUTPUT_ROOT=%s\n' "${OUTPUT_ROOT_VALUE}"
 printf 'train_config TRAIN_LOCK=%s\n' "${TRAIN_LOCK_PATH}"
 printf 'train_config GPU_COUNT=%s\n' "${NPROC_PER_NODE_VALUE}"
 printf 'train_config CUDA_VISIBLE_DEVICES=%s\n' "${CUDA_VISIBLE_DEVICES}"
+printf 'train_config CORE_DUMP_LIMIT=%s\n' "$(ulimit -c)"
 printf 'train_config DDP_TIMEOUT_MINUTES=%s\n' "${DDP_TIMEOUT_MINUTES}"
 printf 'train_config OMP_NUM_THREADS=%s\n' "${OMP_NUM_THREADS}"
 printf 'train_config TORCH_NCCL_TRACE_BUFFER_SIZE=%s\n' "${TORCH_NCCL_TRACE_BUFFER_SIZE}"
