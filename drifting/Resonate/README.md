@@ -49,10 +49,25 @@ Training/evaluation additionally uses:
 weights/bigvgan_v2_44khz_128band_512x/
 sets/latent_mean_44k.pt
 sets/latent_std_44k.pt
+av-benchmark/weights/music_speech_audioset_epoch_15_esc_89.98.pt
+av-benchmark/weights/synchformer_state_dict.pth
 ```
 
 One-step TFD training and AV-Benchmark waveform evaluation are implemented in
 `train.py` and `test.py`.
+
+All fixed runtime checkpoints can be prepared in one locked, standalone
+process:
+
+```bash
+ASSET_DOWNLOAD_GPU=0 \
+bash drifting/scripts/resonate/prepare_runtime_assets.sh
+```
+
+`train.sh` and `smoke_train_eval.sh` call this automatically before any
+`torchrun` process starts. Parallel sweeps share a lock and completion marker,
+so only one launcher downloads while the others reuse the result. See
+`INSTALL.md` for the complete asset table and AV-Benchmark installation.
 
 ## AudioCaps preprocessing interface
 
@@ -643,6 +658,12 @@ eval interval = 10,000
 eval sampler = 1 Euler step, CFG 4.5
 ```
 
+Before workers start, each preset invokes the shared runtime-asset bootstrap.
+The bootstrap exposes only `ASSET_DOWNLOAD_GPU` (default: the first training
+GPU), prints every missing model as `INFO`, and displays download progress.
+It then exits; model preparation is not part of the distributed training
+program. Two presets started concurrently do not repeat the download.
+
 The generic launcher derives its process count from `CUDA_VISIBLE_DEVICES`, so
 the same training can use another GPU count:
 
@@ -681,6 +702,8 @@ gt_audio/
 data/audiocaps/test-features/
 weights/v1-44.pth
 weights/bigvgan_v2_44khz_128band_512x/
+av-benchmark/weights/music_speech_audioset_epoch_15_esc_89.98.pt
+av-benchmark/weights/synchformer_state_dict.pth
 data/audiocaps_resonate/test.tsv
 data/audiocaps_resonate/test-npz-flant5-44k/
 ```
@@ -711,6 +734,10 @@ iteration 3:
 CUDA_VISIBLE_DEVICES=0 \
 bash drifting/scripts/resonate/smoke_train_eval.sh
 ```
+
+Missing released model assets are downloaded before the smoke-test file
+checks. Dataset outputs, `gt_audio/`, and the AV-Benchmark source checkout
+remain explicit prerequisites because they are not model files.
 
 Use multiple GPUs by listing them; the process count is inferred:
 

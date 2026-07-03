@@ -8,6 +8,8 @@ torchvision==0.20.1+cu124
 torchaudio==2.5.1+cu124
 einops>=0.7,<1.0
 numpy>=1.24,<2.1
+scipy>=1.10,<2.0
+librosa>=0.10.2,<1.0
 transformers>=4.46,<5.0
 sentencepiece>=0.2,<1.0
 tqdm>=4.66,<5.0
@@ -16,3 +18,5 @@ pyyaml>=6.0,<7.0
 soundfile>=0.12,<1.0
 huggingface_hub>=0.26,<2.0
 hf_xet>=1.1,<2.0
+cython>=3.0,<4.0
+setuptools<81

@@ -10,6 +10,9 @@ output_root="${OUTPUT_ROOT:-exps/drifting_resonate_smoke}"
 eval_root="${EVAL_OUTPUT_ROOT:-exps/drifting_resonate_eval_smoke}"
 train_dir="${output_root}/${smoke_id}"
 eval_dir="${eval_root}/${smoke_id}"
+python_value="${PYTHON:-python}"
+asset_download_gpu="${ASSET_DOWNLOAD_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
+asset_download_gpu="${asset_download_gpu%%,*}"
 
 if [[ -e "${train_dir}" || -e "${eval_dir}" ]]; then
   printf 'ERROR: refusing to overwrite smoke-test output:\n  %s\n  %s\n' \
@@ -17,10 +20,23 @@ if [[ -e "${train_dir}" || -e "${eval_dir}" ]]; then
   exit 1
 fi
 
+with_av_benchmark=1
+if [[ "${EVAL_SKIP_AV_BENCHMARK:-0}" == "1" ]]; then
+  with_av_benchmark=0
+fi
+printf '%s | INFO | Preparing smoke-test model assets before training\n' \
+  "$(date '+%Y-%m-%d %H:%M:%S')"
+PYTHON="${python_value}" \
+ASSET_DOWNLOAD_GPU="${asset_download_gpu}" \
+WITH_EVAL=1 \
+WITH_AV_BENCHMARK="${with_av_benchmark}" \
+bash drifting/scripts/resonate/prepare_runtime_assets.sh
+
 required=(
   weights/Resonate_GRPO.pth
   weights/v1-44.pth
-  weights/bigvgan_v2_44khz_128band_512x
+  weights/bigvgan_v2_44khz_128band_512x/config.json
+  weights/bigvgan_v2_44khz_128band_512x/bigvgan_generator.pt
   sets/latent_mean_44k.pt
   sets/latent_std_44k.pt
   data/audiocaps_resonate/train.tsv
@@ -69,6 +85,7 @@ EVAL_INTERVAL=2 \
 EVAL_LIMIT="${EVAL_LIMIT:-16}" \
 EVAL_SKIP_AV_BENCHMARK="${EVAL_SKIP_AV_BENCHMARK:-0}" \
 EVAL_FAILURE_FATAL=1 \
+ASSETS_PREPARED=1 \
 bash drifting/scripts/resonate/train.sh
 
 metrics="${train_dir}/metrics.csv"

@@ -84,6 +84,9 @@ DRY_RUN_VALUE="${DRY_RUN:-0}"
 VALIDATE_PREPROCESSING_VALUE="${VALIDATE_PREPROCESSING:-1}"
 VALIDATION_DEEP_VALUE="${VALIDATION_DEEP:-0}"
 VALIDATION_SAMPLE_COUNT_VALUE="${VALIDATION_SAMPLE_COUNT:-16}"
+PREPARE_ASSETS_VALUE="${PREPARE_ASSETS:-1}"
+ASSETS_PREPARED_VALUE="${ASSETS_PREPARED:-0}"
+ASSET_DOWNLOAD_GPU_VALUE="${ASSET_DOWNLOAD_GPU:-${visible_devices[0]}}"
 
 train_args=(
   drifting/Resonate/train.py
@@ -162,6 +165,7 @@ printf 'train_config EVAL_NUM_STEPS=%s\n' "${EVAL_NUM_STEPS_VALUE}"
 printf 'train_config EVAL_CFG_STRENGTH=%s\n' "${EVAL_CFG_STRENGTH_VALUE}"
 printf 'train_config VALIDATE_PREPROCESSING=%s\n' "${VALIDATE_PREPROCESSING_VALUE}"
 printf 'train_config VALIDATION_DEEP=%s\n' "${VALIDATION_DEEP_VALUE}"
+printf 'train_config PREPARE_ASSETS=%s\n' "${PREPARE_ASSETS_VALUE}"
 
 if ((NPROC_PER_NODE_VALUE == 1)); then
   command=("${PYTHON_VALUE}" "${train_args[@]}")
@@ -179,6 +183,34 @@ if [[ "${DRY_RUN_VALUE}" == "1" ]]; then
   printf ' %q' "${command[@]}"
   printf '\n'
   exit 0
+fi
+
+if [[ "${PREPARE_ASSETS_VALUE}" == "1" && "${ASSETS_PREPARED_VALUE}" != "1" ]]; then
+  if [[ ! "${EVAL_INTERVAL_VALUE}" =~ ^[0-9]+$ ]]; then
+    printf 'ERROR: EVAL_INTERVAL must be a non-negative integer\n' >&2
+    exit 1
+  fi
+  with_eval=0
+  with_av_benchmark=0
+  if ((EVAL_INTERVAL_VALUE > 0)); then
+    with_eval=1
+    if [[ "${EVAL_SKIP_AV_BENCHMARK_VALUE}" != "1" ]]; then
+      with_av_benchmark=1
+    fi
+  fi
+  printf '%s | INFO | Preparing model assets before distributed training\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')"
+  PYTHON="${PYTHON_VALUE}" \
+  ASSET_DOWNLOAD_GPU="${ASSET_DOWNLOAD_GPU_VALUE}" \
+  TEACHER_WEIGHTS="${TEACHER_WEIGHTS_VALUE}" \
+  STUDENT_INIT="${STUDENT_INIT_VALUE}" \
+  LATENT_MEAN="${LATENT_MEAN_VALUE}" \
+  LATENT_STD="${LATENT_STD_VALUE}" \
+  EVAL_VAE_WEIGHTS="${EVAL_VAE_WEIGHTS_VALUE}" \
+  EVAL_VOCODER_DIR="${EVAL_VOCODER_DIR_VALUE}" \
+  WITH_EVAL="${with_eval}" \
+  WITH_AV_BENCHMARK="${with_av_benchmark}" \
+  bash drifting/scripts/resonate/prepare_runtime_assets.sh
 fi
 
 if [[ "${VALIDATE_PREPROCESSING_VALUE}" == "1" ]]; then
