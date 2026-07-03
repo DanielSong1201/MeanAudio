@@ -14,7 +14,10 @@ import numpy as np
 import torch
 
 from drifting.Resonate.build_teacher_positive_bank import euler_sample
-from drifting.Resonate.config import RESONATE_CONFIG
+from drifting.Resonate.config import (
+    RESONATE_CONFIG,
+    missing_av_benchmark_gt_cache_files,
+)
 from drifting.Resonate.model import build_resonate_model
 from meanaudio.ext.autoencoder.vae import get_my_vae
 from meanaudio.ext.bigvgan_v2.bigvgan import BigVGAN
@@ -264,13 +267,17 @@ def run_eval(args: argparse.Namespace) -> None:
         raise FileNotFoundError(
             f"Missing {benchmark_entrypoint}. Install av-benchmark at the repository root."
         )
-    if not args.gt_audio.exists():
-        raise FileNotFoundError(f"Missing AV-Benchmark ground-truth audio: {args.gt_audio}")
+    missing_gt_cache = missing_av_benchmark_gt_cache_files(args.gt_cache)
+    if missing_gt_cache and not args.gt_audio.is_dir():
+        missing_text = ", ".join(str(path) for path in missing_gt_cache)
+        raise FileNotFoundError(
+            "AV-Benchmark ground-truth cache is incomplete and cannot be rebuilt "
+            f"because the GT audio directory is missing: {args.gt_audio}. "
+            f"Missing cache files: {missing_text}"
+        )
     command = [
         sys.executable,
         str(benchmark_entrypoint),
-        "--gt_audio",
-        str(args.gt_audio),
         "--gt_cache",
         str(args.gt_cache),
         "--pred_audio",
@@ -281,6 +288,23 @@ def run_eval(args: argparse.Namespace) -> None:
         "--recompute_pred_cache",
         "--skip_video_related",
     ]
+    if missing_gt_cache:
+        log.info(
+            "Ground-truth cache is incomplete; rebuilding it from %s",
+            args.gt_audio,
+        )
+        command.extend(
+            [
+                "--gt_audio",
+                str(args.gt_audio),
+                "--recompute_gt_cache",
+            ]
+        )
+    else:
+        log.info(
+            "Using complete ground-truth cache at %s; gt_audio is not required",
+            args.gt_cache,
+        )
     log.info("Step 2/2: computing AV-Benchmark metrics")
     run_and_tee(command, args.output / "evaluate.log")
     log.info("Step 2/2 complete: evaluate_log=%s", args.output / "evaluate.log")
@@ -299,7 +323,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/audiocaps/test-features"),
     )
-    parser.add_argument("--gt-audio", type=Path, default=Path("gt_audio"))
+    parser.add_argument(
+        "--gt-audio",
+        type=Path,
+        default=Path(os.environ.get("GT_AUDIO", "gt_audio")),
+    )
     parser.add_argument(
         "--eval-tsv",
         type=Path,

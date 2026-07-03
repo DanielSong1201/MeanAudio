@@ -214,9 +214,24 @@ drifting/data/AudioCaps_CVSSP/                         # raw AudioCaps symlink
 data/audiocaps_resonate/train-npz-flant5-44k/         # processed train data
 data/audiocaps_resonate/train-teacher-positives-resonate-grpo-25step-cfg4.5/
 data/audiocaps_resonate/test-npz-flant5-44k/           # processed eval data
-gt_audio/                                               # AV-Benchmark GT audio
+gt_audio/                                               # optional GT-cache rebuild source
 data/audiocaps/test-features/                           # AV-Benchmark GT cache
 ```
+
+For periodic evaluation, the four core files under
+`data/audiocaps/test-features/` are sufficient:
+
+```text
+pann_features.pth
+vggish_features.pth
+passt_features_embed.pth
+passt_logits.pth
+```
+
+When all four exist, `gt_audio/` is not required. If any core cache file is
+missing, the evaluator requires `gt_audio/` and rebuilds the GT cache
+explicitly. A non-default fallback directory can be selected with
+`EVAL_GT_AUDIO=/path/to/audio`.
 
 The exact preprocessing and positive-bank commands are documented in
 `drifting/Resonate/README.md`. `train.sh` validates them after model

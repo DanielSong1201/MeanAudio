@@ -23,7 +23,10 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from drifting.Resonate.config import RESONATE_CONFIG
+from drifting.Resonate.config import (
+    RESONATE_CONFIG,
+    missing_av_benchmark_gt_cache_files,
+)
 from drifting.Resonate.data import ResonateNpzDataset
 from drifting.Resonate.model import build_resonate_model, freeze_resonate_teacher
 from drifting.eval_helpers import (
@@ -632,6 +635,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/audiocaps/test-features"),
     )
     parser.add_argument(
+        "--eval-gt-audio",
+        type=Path,
+        default=Path("gt_audio"),
+        help=(
+            "Ground-truth audio used only when the AV-Benchmark GT cache "
+            "must be rebuilt."
+        ),
+    )
+    parser.add_argument(
         "--eval-tsv",
         type=Path,
         default=Path("data/audiocaps_resonate/test.tsv"),
@@ -736,16 +748,27 @@ def validate_args(args: argparse.Namespace) -> None:
             if not path.exists():
                 raise FileNotFoundError(f"Missing periodic-eval asset: {path}")
         if not args.eval_skip_av_benchmark:
-            for path in (Path("av-benchmark/evaluate.py"), Path("gt_audio")):
-                if not path.exists():
-                    raise FileNotFoundError(
-                        f"Missing AV-Benchmark asset: {path}. "
-                        "Use --eval-skip-av-benchmark only for a generation smoke test."
-                    )
+            benchmark_entrypoint = Path("av-benchmark/evaluate.py")
+            if not benchmark_entrypoint.is_file():
+                raise FileNotFoundError(
+                    f"Missing AV-Benchmark asset: {benchmark_entrypoint}. "
+                    "Use --eval-skip-av-benchmark only for a generation smoke test."
+                )
+            missing_gt_cache = missing_av_benchmark_gt_cache_files(
+                args.eval_gt_cache
+            )
+            if missing_gt_cache and not args.eval_gt_audio.is_dir():
+                missing_text = ", ".join(str(path) for path in missing_gt_cache)
+                raise FileNotFoundError(
+                    "AV-Benchmark GT cache is incomplete and the fallback GT "
+                    f"audio directory is missing: {args.eval_gt_audio}. "
+                    f"Missing cache files: {missing_text}"
+                )
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    validate_args(args)
     distributed, rank, local_rank, world_size = setup_distributed()
     is_main = rank == 0
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -769,7 +792,6 @@ def main() -> None:
     if distributed:
         logger.info("Distributed training enabled: world_size=%d", world_size)
     logger.info("Arguments: %s", vars(args))
-    validate_args(args)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -1171,6 +1193,7 @@ def main() -> None:
 
             if is_main:
                 eval_environment = {
+                    "GT_AUDIO": str(args.eval_gt_audio),
                     "EVAL_TSV": str(args.eval_tsv),
                     "EVAL_NPZ_DIR": str(args.eval_npz_dir),
                     "VAE_WEIGHTS": str(args.eval_vae_weights),

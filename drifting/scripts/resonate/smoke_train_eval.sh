@@ -53,9 +53,29 @@ for path in "${required[@]}"; do
 done
 
 if [[ "${EVAL_SKIP_AV_BENCHMARK:-0}" != "1" ]]; then
-  if [[ ! -f av-benchmark/evaluate.py || ! -d gt_audio ]]; then
-    printf 'ERROR: AV-Benchmark smoke requires av-benchmark/evaluate.py and gt_audio/\n' >&2
+  if [[ ! -f av-benchmark/evaluate.py ]]; then
+    printf 'ERROR: AV-Benchmark smoke requires av-benchmark/evaluate.py\n' >&2
     printf 'Set EVAL_SKIP_AV_BENCHMARK=1 only to test generation without metrics.\n' >&2
+    exit 1
+  fi
+  gt_cache="${EVAL_GT_CACHE:-data/audiocaps/test-features}"
+  gt_audio="${EVAL_GT_AUDIO:-gt_audio}"
+  gt_cache_files=(
+    pann_features.pth
+    vggish_features.pth
+    passt_features_embed.pth
+    passt_logits.pth
+  )
+  missing_gt_cache=0
+  for filename in "${gt_cache_files[@]}"; do
+    if [[ ! -s "${gt_cache}/${filename}" ]]; then
+      missing_gt_cache=1
+      break
+    fi
+  done
+  if ((missing_gt_cache == 1)) && [[ ! -d "${gt_audio}" ]]; then
+    printf 'ERROR: AV-Benchmark GT cache is incomplete and GT audio is missing: %s\n' \
+      "${gt_audio}" >&2
     exit 1
   fi
 fi

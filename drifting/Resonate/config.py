@@ -5,6 +5,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+AV_BENCHMARK_GT_CACHE_FILES = (
+    "pann_features.pth",
+    "vggish_features.pth",
+    "passt_features_embed.pth",
+    "passt_logits.pth",
+)
+
+
+def missing_av_benchmark_gt_cache_files(cache_dir: Path) -> tuple[Path, ...]:
+    missing = []
+    for filename in AV_BENCHMARK_GT_CACHE_FILES:
+        path = cache_dir / filename
+        if not path.is_file() or path.stat().st_size == 0:
+            missing.append(path)
+    return tuple(missing)
+
+
 @dataclass(frozen=True, slots=True)
 class ResonateModelConfig:
     """Single source of truth for the released Resonate-GRPO architecture."""

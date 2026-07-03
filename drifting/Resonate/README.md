@@ -698,7 +698,6 @@ Required evaluation assets are:
 
 ```text
 av-benchmark/evaluate.py
-gt_audio/
 data/audiocaps/test-features/
 weights/v1-44.pth
 weights/bigvgan_v2_44khz_128band_512x/
@@ -707,6 +706,12 @@ av-benchmark/weights/synchformer_state_dict.pth
 data/audiocaps_resonate/test.tsv
 data/audiocaps_resonate/test-npz-flant5-44k/
 ```
+
+`gt_audio/` is only a fallback for rebuilding an incomplete GT feature cache.
+If `pann_features.pth`, `vggish_features.pth`,
+`passt_features_embed.pth`, and `passt_logits.pth` all exist under
+`data/audiocaps/test-features/`, evaluation uses that cache directly and does
+not require the original GT audio.
 
 The default outputs are:
 
@@ -736,8 +741,9 @@ bash drifting/scripts/resonate/smoke_train_eval.sh
 ```
 
 Missing released model assets are downloaded before the smoke-test file
-checks. Dataset outputs, `gt_audio/`, and the AV-Benchmark source checkout
-remain explicit prerequisites because they are not model files.
+checks. Dataset outputs and the AV-Benchmark source checkout remain explicit
+prerequisites because they are not model files. `gt_audio/` is required only
+when the GT feature cache must be rebuilt.
 
 Use multiple GPUs by listing them; the process count is inferred:
 
