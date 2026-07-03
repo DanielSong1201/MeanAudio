@@ -11,9 +11,10 @@ Phase 0-3 has been designed for:
 - CUDA-enabled PyTorch
 
 The current implementation constructs the Resonate architecture, validates
-the TFD feature-gradient contract, preprocesses AudioCaps, and generates the
-offline teacher-positive bank. It does not need the full Resonate GRPO/RL
-dependency stack.
+the TFD feature-gradient contract, preprocesses AudioCaps, generates the
+offline teacher-positive bank, trains the one-step TFD student, and evaluates
+it with AV-Benchmark. It does not need the full Resonate GRPO/RL dependency
+stack.
 
 ## 1. Create the Conda environment
 
@@ -139,6 +140,21 @@ This produces:
 
 ```text
 weights/v1-44.pth
+```
+
+Waveform evaluation also requires a local 44.1 kHz BigVGAN-v2 snapshot:
+
+```bash
+huggingface-cli download \
+  nvidia/bigvgan_v2_44khz_128band_512x \
+  --local-dir weights/bigvgan_v2_44khz_128band_512x
+```
+
+Install AV-Benchmark at the repository root using the existing MeanAudio
+instructions. The expected entrypoint is:
+
+```text
+av-benchmark/evaluate.py
 ```
 
 To use another storage root:

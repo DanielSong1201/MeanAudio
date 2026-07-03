@@ -12,6 +12,7 @@ transformers>=4.46,<5.0
 sentencepiece>=0.2,<1.0
 tqdm>=4.66,<5.0
 omegaconf>=2.3,<3.0
+pyyaml>=6.0,<7.0
 soundfile>=0.12,<1.0
 huggingface_hub>=0.26,<2.0
 hf_xet>=1.1,<2.0

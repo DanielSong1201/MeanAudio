@@ -22,9 +22,8 @@ Environment installation and checkpoint download instructions are in
 - Teacher and student can be constructed independently from
   `Resonate_GRPO.pth` or `Resonate_PT.pth`.
 - `extract_features()` exposes differentiable intermediate audio-token states
-  for TFD. Positive features must be extracted under `torch.no_grad()` by the
-  future training entrypoint; generated features must not be wrapped in
-  `torch.no_grad()`.
+  for TFD. Positive features are extracted under `torch.no_grad()` by
+  `train.py`; generated features are not wrapped in `torch.no_grad()`.
 - All 44.1 kHz asset paths and model dimensions live in `config.py`.
 
 The default TFD layers preserve the relative placement of the FluxAudio-S
@@ -42,9 +41,9 @@ weights/Resonate_PT.pth
 weights/v1-44.pth
 ```
 
-`Resonate_GRPO.pth` is required for teacher-positive generation and
-`v1-44.pth` is required for AudioCaps preprocessing. The following assets are
-reserved for later waveform evaluation:
+`Resonate_GRPO.pth` is required for teacher-positive generation and training;
+`v1-44.pth` is required for AudioCaps preprocessing and waveform decoding.
+Training/evaluation additionally uses:
 
 ```text
 weights/bigvgan_v2_44khz_128band_512x/
@@ -52,7 +51,8 @@ sets/latent_mean_44k.pt
 sets/latent_std_44k.pt
 ```
 
-Training and waveform evaluation remain to be implemented.
+One-step TFD training and AV-Benchmark waveform evaluation are implemented in
+`train.py` and `test.py`.
 
 ## AudioCaps preprocessing interface
 
@@ -150,7 +150,7 @@ data/audiocaps_resonate/
 ```
 
 `ResonateNpzDataset` validates and loads these three generated positives. The
-future training loss will sample one real latent from the AudioCaps posterior
+training loss samples one real latent from the AudioCaps posterior
 and concatenate it with the three bank entries, giving four prompt-matched
 positives without duplicating the real sample on disk.
 
@@ -240,7 +240,7 @@ Generation is resumable. Re-running the full command skips every existing
 only after all expected files exist. Do not use `--overwrite` when merely
 resuming an interrupted run.
 
-During future training, the three stored latents are combined with one newly
+During training, the three stored latents are combined with one newly
 sampled real AudioCaps posterior latent:
 
 ```text
@@ -320,8 +320,9 @@ AMP
 LIMIT
 OVERWRITE
 ALLOW_INCOMPLETE_DATA
-DDP_TIMEOUT_MINUTES
-NCCL_P2P_DISABLE
+COMPLETION_POLL_SECONDS
+COMPLETION_TIMEOUT_MINUTES
+SHOW_ALL_GPU_PROGRESS
 ```
 
 `AMP=0` selects full precision. `OVERWRITE=0` is the safe default and resumes
@@ -332,6 +333,44 @@ simultaneously. To inspect the resolved command without loading a model:
 ```bash
 CUDA_VISIBLE_DEVICES=0,2,3 \
 DRY_RUN=1 \
+bash drifting/scripts/resonate/build_teacher_positive_bank.sh
+```
+
+Multi-GPU positive generation does not initialize a Torch/NCCL process group.
+Each `torchrun` worker owns a disjoint index shard and writes atomic NPZ files.
+Workers report completion through files under `.run_state/`; rank0 writes
+`complete.json` only after every worker marker and every expected NPZ exist.
+This avoids collective timeouts when GPU shards finish hours apart.
+
+Interrupted generation resumes by default. Run the same command again with
+`OVERWRITE=0` (the default); existing `<index>.npz` files are retained and only
+missing indices are generated. The GPU count may be changed when resuming:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+OVERWRITE=0 \
+bash drifting/scripts/resonate/build_teacher_positive_bank.sh
+```
+
+`COMPLETION_TIMEOUT_MINUTES=0` means rank0 waits without a fixed timeout for
+slower workers. Set a positive value only when an explicit upper bound is
+desired.
+
+By default, every GPU/rank owns a fixed tqdm row in the same terminal:
+
+```text
+resonate-positives-gpu0-rank0:  31%|...
+resonate-positives-gpu1-rank1:  33%|...
+resonate-positives-gpu2-rank2:  32%|...
+resonate-positives-gpu3-rank3:  33%|...
+```
+
+For redirected logs or terminals without reliable ANSI cursor control, keep
+only the rank0 progress row:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+SHOW_ALL_GPU_PROGRESS=0 \
 bash drifting/scripts/resonate/build_teacher_positive_bank.sh
 ```
 
@@ -472,7 +511,7 @@ text_features        [77, 1024]
 text_features_c      [1024]
 ```
 
-The path registry for future training is:
+The training data-path registry is:
 
 ```text
 config/data/resonate_flant5_44k.yaml
@@ -518,10 +557,10 @@ Each file contains:
 latents_normalized [3, latent_tokens, 40]
 ```
 
-### 6. Four-positive training interface
+### 6. Four-positive TFD training
 
 `ResonateNpzDataset` reads the real posterior and the three generated entries.
-The future training step will construct:
+The training step constructs:
 
 ```text
 sample(mean, std)                  -> 1 real positive
@@ -530,8 +569,116 @@ latents_normalized from bank       -> 3 generated positives
                                       4 positives per prompt
 ```
 
-The data preparation and three-positive bank are implemented. The Resonate TFD
-training loop that consumes these four positives is the next unfinished stage.
+The real sample is normalized exactly once. The three generated entries are
+already normalized and are concatenated without a second normalization.
+
+The two initial four-GPU presets match the Flux experiments:
+
+```bash
+# lr=1e-6, TFD=100, anchor=1, flow=0.1, warmup=1000, 200k iterations
+bash drifting/scripts/resonate/train_tfd100_anchor1_flow01_4gpu.sh
+
+# lr=1e-6, TFD=1, anchor=1, flow=0.05, warmup=1000, 200k iterations
+bash drifting/scripts/resonate/train_tfd1_anchor1_flow005_4gpu.sh
+```
+
+Both use:
+
+```text
+teacher = weights/Resonate_GRPO.pth
+student init = weights/Resonate_GRPO.pth
+1 real positive + 3 offline Resonate positives
+feature layers = joint_15,fused_17,fused_35
+save interval = 1,000
+eval interval = 10,000
+eval sampler = 1 Euler step, CFG 4.5
+```
+
+The generic launcher derives its process count from `CUDA_VISIBLE_DEVICES`, so
+the same training can use another GPU count:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,2 \
+LAMBDA_TFD=1 \
+LAMBDA_ANCHOR=1 \
+LAMBDA_FLOW=0.05 \
+bash drifting/scripts/resonate/train.sh
+```
+
+Inspect the resolved command without starting training:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DRY_RUN=1 \
+bash drifting/scripts/resonate/train_tfd100_anchor1_flow01_4gpu.sh
+```
+
+### 7. Periodic AV-Benchmark evaluation
+
+Every `--eval-interval` iterations, rank0 evaluates the EMA checkpoint by
+default. The evaluation:
+
+1. loads precomputed Flan-T5 conditions from the Resonate test NPZ directory;
+2. runs the one-step Resonate sampler;
+3. decodes with `v1-44.pth` and the local 44.1 kHz BigVGAN-v2;
+4. writes FLAC files under the iteration-specific eval directory;
+5. calls `av-benchmark/evaluate.py` with the same audio-only settings as Flux.
+
+Required evaluation assets are:
+
+```text
+av-benchmark/evaluate.py
+gt_audio/
+data/audiocaps/test-features/
+weights/v1-44.pth
+weights/bigvgan_v2_44khz_128band_512x/
+data/audiocaps_resonate/test.tsv
+data/audiocaps_resonate/test-npz-flant5-44k/
+```
+
+The default outputs are:
+
+```text
+exps/drifting_resonate/<exp_id>/
+exps/drifting_resonate_eval/<exp_id>/it_00010000/
+```
+
+Evaluate a checkpoint manually with the same path:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+MODEL_PATH=exps/drifting_resonate/<exp_id>/<exp_id>_10000_ema.pth \
+OUTPUT_PATH=exps/drifting_resonate_eval/<exp_id>/manual_it10000 \
+bash drifting/scripts/resonate/eval_checkpoint.sh
+```
+
+### 8. Train/eval smoke test
+
+The smoke test uses a new timestamped experiment. It trains iteration 1,
+saves and evaluates at iteration 2, then verifies training continued through
+iteration 3:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+bash drifting/scripts/resonate/smoke_train_eval.sh
+```
+
+Use multiple GPUs by listing them; the process count is inferred:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+bash drifting/scripts/resonate/smoke_train_eval.sh
+```
+
+By default it generates sixteen eval samples and runs AV-Benchmark. For a faster
+generation-only diagnostic:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+EVAL_LIMIT=2 \
+EVAL_SKIP_AV_BENCHMARK=1 \
+bash drifting/scripts/resonate/smoke_train_eval.sh
+```
 
 ## Phase 0-3 server validation
 
