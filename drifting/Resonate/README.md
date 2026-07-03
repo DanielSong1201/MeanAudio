@@ -356,7 +356,7 @@ bash drifting/scripts/resonate/build_teacher_positive_bank.sh
 slower workers. Set a positive value only when an explicit upper bound is
 desired.
 
-By default, every GPU/rank owns a fixed tqdm row in the same terminal:
+By default, every GPU/rank has a fixed tqdm row in the same terminal:
 
 ```text
 resonate-positives-gpu0-rank0:  31%|...
@@ -364,6 +364,12 @@ resonate-positives-gpu1-rank1:  33%|...
 resonate-positives-gpu2-rank2:  32%|...
 resonate-positives-gpu3-rank3:  33%|...
 ```
+
+The worker processes do not write ANSI progress output directly. Each worker
+atomically publishes `completed/total` under the current `.run_state/`
+directory, and one rank0 renderer owns all four terminal rows. This avoids
+stale duplicate or "ghost" progress lines caused by independent torchrun
+processes racing to reposition the same terminal cursor.
 
 For redirected logs or terminals without reliable ANSI cursor control, keep
 only the rank0 progress row:
@@ -557,7 +563,50 @@ Each file contains:
 latents_normalized [3, latent_tokens, 40]
 ```
 
-### 6. Four-positive TFD training
+### 6. Validate the complete preprocessing pipeline
+
+Before training, run the fast completeness check:
+
+```bash
+bash drifting/scripts/resonate/check_preprocessing_complete.sh
+```
+
+It checks:
+
+- `train`, `eval`, and `test` TSV row counts;
+- matching preprocessing `config.json` and `complete.json`;
+- every expected numeric NPZ filename from `0` through `num_items - 1`;
+- required arrays and Resonate dimensions in evenly distributed samples;
+- matching positive-bank `config.json` and `complete.json`;
+- one positive NPZ for every training index;
+- at least three positives per checked prompt;
+- sampled `item_index`, `item_id`, and real/positive latent-shape alignment.
+
+The command exits with status 1 if any expected preprocessing or positive file
+is missing. A successful fast check ends with:
+
+```text
+[success] Resonate preprocessing is complete (deep=False, warnings=0)
+```
+
+For a full content scan of every NPZ, including NaN/infinity checks:
+
+```bash
+DEEP=1 \
+bash drifting/scripts/resonate/check_preprocessing_complete.sh
+```
+
+Fast mode still checks the existence of every indexed NPZ; only expensive
+array-content checks are sampled. `drifting/scripts/resonate/train.sh` runs the
+fast check automatically before model loading. It can be controlled with:
+
+```text
+VALIDATE_PREPROCESSING=1   # default; refuse incomplete training data
+VALIDATION_DEEP=0          # set 1 for a full pre-training scan
+VALIDATION_SAMPLE_COUNT=16
+```
+
+### 7. Four-positive TFD training
 
 `ResonateNpzDataset` reads the real posterior and the three generated entries.
 The training step constructs:
@@ -613,7 +662,7 @@ DRY_RUN=1 \
 bash drifting/scripts/resonate/train_tfd100_anchor1_flow01_4gpu.sh
 ```
 
-### 7. Periodic AV-Benchmark evaluation
+### 8. Periodic AV-Benchmark evaluation
 
 Every `--eval-interval` iterations, rank0 evaluates the EMA checkpoint by
 default. The evaluation:
@@ -652,7 +701,7 @@ OUTPUT_PATH=exps/drifting_resonate_eval/<exp_id>/manual_it10000 \
 bash drifting/scripts/resonate/eval_checkpoint.sh
 ```
 
-### 8. Train/eval smoke test
+### 9. Train/eval smoke test
 
 The smoke test uses a new timestamped experiment. It trains iteration 1,
 saves and evaluates at iteration 2, then verifies training continued through

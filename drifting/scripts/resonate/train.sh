@@ -81,6 +81,9 @@ EMA_DEVICE_VALUE="${EMA_DEVICE:-cpu}"
 CLIP_GRAD_NORM_VALUE="${CLIP_GRAD_NORM:-1.0}"
 AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
 DRY_RUN_VALUE="${DRY_RUN:-0}"
+VALIDATE_PREPROCESSING_VALUE="${VALIDATE_PREPROCESSING:-1}"
+VALIDATION_DEEP_VALUE="${VALIDATION_DEEP:-0}"
+VALIDATION_SAMPLE_COUNT_VALUE="${VALIDATION_SAMPLE_COUNT:-16}"
 
 train_args=(
   drifting/Resonate/train.py
@@ -157,6 +160,8 @@ printf 'train_config LAMBDA_ANCHOR=%s\n' "${LAMBDA_ANCHOR_VALUE}"
 printf 'train_config EVAL_INTERVAL=%s\n' "${EVAL_INTERVAL_VALUE}"
 printf 'train_config EVAL_NUM_STEPS=%s\n' "${EVAL_NUM_STEPS_VALUE}"
 printf 'train_config EVAL_CFG_STRENGTH=%s\n' "${EVAL_CFG_STRENGTH_VALUE}"
+printf 'train_config VALIDATE_PREPROCESSING=%s\n' "${VALIDATE_PREPROCESSING_VALUE}"
+printf 'train_config VALIDATION_DEEP=%s\n' "${VALIDATION_DEEP_VALUE}"
 
 if ((NPROC_PER_NODE_VALUE == 1)); then
   command=("${PYTHON_VALUE}" "${train_args[@]}")
@@ -174,6 +179,16 @@ if [[ "${DRY_RUN_VALUE}" == "1" ]]; then
   printf ' %q' "${command[@]}"
   printf '\n'
   exit 0
+fi
+
+if [[ "${VALIDATE_PREPROCESSING_VALUE}" == "1" ]]; then
+  PYTHON="${PYTHON_VALUE}" \
+  DATA_CONFIG="${DATA_CONFIG_VALUE}" \
+  TEACHER_POSITIVE_DIR="${TEACHER_POSITIVE_DIR_VALUE}" \
+  TEACHER_POSITIVE_COUNT="${TEACHER_POSITIVE_COUNT_VALUE}" \
+  SAMPLE_COUNT="${VALIDATION_SAMPLE_COUNT_VALUE}" \
+  DEEP="${VALIDATION_DEEP_VALUE}" \
+  bash drifting/scripts/resonate/check_preprocessing_complete.sh
 fi
 
 if ! command -v flock >/dev/null 2>&1; then

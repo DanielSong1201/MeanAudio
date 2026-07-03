@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,102 @@ def wait_for_file(
         time.sleep(poll_seconds)
 
 
+def write_progress_state(
+    *,
+    run_dir: Path,
+    rank: int,
+    total: int,
+    completed: int,
+    status: str,
+    item_index: int | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "rank": rank,
+        "total": total,
+        "completed": completed,
+        "status": status,
+        "updated_at": time.time(),
+    }
+    if item_index is not None:
+        payload["item_index"] = item_index
+    atomic_write_json(run_dir / f"progress_rank_{rank}.json", payload)
+
+
+class CentralProgressRenderer:
+    """Render all worker progress bars from rank0 only.
+
+    Independent torchrun processes do not share tqdm's in-process lock. If
+    every worker manipulates ANSI cursor positions directly, old snapshots can
+    be left behind as ghost bars. Workers therefore publish atomic JSON state,
+    while this single rank0 thread owns all terminal rendering.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_dir: Path,
+        shard_totals: list[int],
+        show_all_ranks: bool,
+        refresh_seconds: float = 0.5,
+    ) -> None:
+        self.run_dir = run_dir
+        self.refresh_seconds = refresh_seconds
+        self.stop_event = threading.Event()
+        ranks = range(len(shard_totals)) if show_all_ranks else range(1)
+        self.bars = {
+            rank: tqdm(
+                total=shard_totals[rank],
+                desc=(
+                    f"resonate-positives-gpu{physical_gpu_label(rank)}"
+                    f"-rank{rank}"
+                ),
+                position=rank if show_all_ranks else 0,
+                leave=True,
+                dynamic_ncols=True,
+                unit="prompt",
+                mininterval=refresh_seconds,
+            )
+            for rank in ranks
+        }
+        self.thread = threading.Thread(
+            target=self._run,
+            name="positive-progress-renderer",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def _refresh_once(self) -> None:
+        for rank, bar in self.bars.items():
+            path = self.run_dir / f"progress_rank_{rank}.json"
+            if not path.is_file():
+                continue
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+                completed = int(state["completed"])
+                status = str(state.get("status", "running"))
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+            completed = min(max(completed, 0), bar.total or 0)
+            if completed > bar.n:
+                bar.update(completed - bar.n)
+            if status == "done":
+                bar.set_postfix_str("done", refresh=False)
+
+    def _run(self) -> None:
+        while not self.stop_event.wait(self.refresh_seconds):
+            self._refresh_once()
+        self._refresh_once()
+
+    def close(self) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout=max(5.0, self.refresh_seconds * 4))
+        self._refresh_once()
+        for bar in self.bars.values():
+            bar.close()
+
+
 def euler_sample(
     *,
     model,
@@ -315,20 +412,26 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
     # original index modulo assignment. This keeps all GPUs busy when resuming
     # after only one rank was interrupted.
     pending_indices = pending_all[rank::world_size]
-
-    progress = tqdm(
-        pending_indices,
+    write_progress_state(
+        run_dir=run_dir,
+        rank=rank,
         total=len(pending_indices),
-        desc=(
-            f"resonate-positives-gpu{physical_gpu_label(local_rank)}"
-            f"-rank{rank}"
-        ),
-        disable=not args.progress_all_ranks and not is_main,
-        position=rank if args.progress_all_ranks else 0,
-        leave=True,
-        dynamic_ncols=True,
-        unit="prompt",
+        completed=0,
+        status="running",
     )
+    progress_renderer: CentralProgressRenderer | None = None
+    if is_main:
+        shard_totals = [
+            len(pending_all[worker_rank::world_size])
+            for worker_rank in range(world_size)
+        ]
+        progress_renderer = CentralProgressRenderer(
+            run_dir=run_dir,
+            shard_totals=shard_totals,
+            show_all_ranks=args.progress_all_ranks,
+        )
+        progress_renderer.start()
+
     if pending_indices:
         model_dtype = (
             torch.bfloat16 if args.amp and device.type == "cuda" else torch.float32
@@ -346,7 +449,7 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
         )
 
         with torch.inference_mode():
-            for index in progress:
+            for completed, index in enumerate(pending_indices, start=1):
                 output_path = args.output_dir / f"{index}.npz"
                 item = dataset[index]
                 latent_seq_len = int(item["mean"].shape[0])
@@ -404,7 +507,21 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
                     item_index=np.asarray(index, dtype=np.int64),
                     item_id=np.asarray(item["id"]),
                 )
-    progress.close()
+                write_progress_state(
+                    run_dir=run_dir,
+                    rank=rank,
+                    total=len(pending_indices),
+                    completed=completed,
+                    status="running",
+                    item_index=index,
+                )
+    write_progress_state(
+        run_dir=run_dir,
+        rank=rank,
+        total=len(pending_indices),
+        completed=len(pending_indices),
+        status="done",
+    )
 
     atomic_write_json(
         run_dir / f"rank_{rank}.json",
@@ -416,25 +533,32 @@ def generate_teacher_positive_bank(args: argparse.Namespace) -> None:
         },
     )
     if is_main:
-        if multi_process:
-            wait_for_worker_markers(
-                run_dir=run_dir,
-                world_size=world_size,
-                poll_seconds=args.completion_poll_seconds,
-                timeout_minutes=args.completion_timeout_minutes,
-                logger=logger,
+        try:
+            if multi_process:
+                wait_for_worker_markers(
+                    run_dir=run_dir,
+                    world_size=world_size,
+                    poll_seconds=args.completion_poll_seconds,
+                    timeout_minutes=args.completion_timeout_minutes,
+                    logger=logger,
+                )
+            missing_count, first_missing = count_missing_outputs(
+                args.output_dir,
+                num_items,
             )
-        missing_count, first_missing = count_missing_outputs(
-            args.output_dir,
-            num_items,
-        )
-        if missing_count:
-            raise RuntimeError(
-                f"Positive bank incomplete: {missing_count} files missing; "
-                f"first indices={first_missing}"
+            if missing_count:
+                raise RuntimeError(
+                    f"Positive bank incomplete: {missing_count} files missing; "
+                    f"first indices={first_missing}"
+                )
+            atomic_write_json(complete_path, config)
+            logger.info(
+                "[ok] Resonate teacher-positive bank complete: %s",
+                args.output_dir,
             )
-        atomic_write_json(complete_path, config)
-        logger.info("[ok] Resonate teacher-positive bank complete: %s", args.output_dir)
+        finally:
+            if progress_renderer is not None:
+                progress_renderer.close()
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
