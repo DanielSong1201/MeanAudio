@@ -21,9 +21,32 @@ CFG_STRENGTH_VALUE="${CFG_STRENGTH:-4.5}"
 USE_ROPE_VALUE="${USE_ROPE:-1}"
 EVAL_LIMIT_VALUE="${EVAL_LIMIT:-}"
 EVAL_SKIP_AV_BENCHMARK_VALUE="${EVAL_SKIP_AV_BENCHMARK:-0}"
+PREPARE_ASSETS_VALUE="${PREPARE_ASSETS:-1}"
+asset_download_gpu="${ASSET_DOWNLOAD_GPU:-${CUDA_VISIBLE_DEVICES%%,*}}"
+
+if [[ "${PREPARE_ASSETS_VALUE}" == "1" ]]; then
+  with_av_benchmark=1
+  if [[ "${EVAL_SKIP_AV_BENCHMARK_VALUE}" == "1" ]]; then
+    with_av_benchmark=0
+  fi
+  PYTHON="${PYTHON:-python}" \
+  ASSET_DOWNLOAD_GPU="${asset_download_gpu}" \
+  TEACHER_WEIGHTS="${MODEL_PATH_VALUE}" \
+  STUDENT_INIT="${MODEL_PATH_VALUE}" \
+  EVAL_VAE_WEIGHTS="${VAE_WEIGHTS_VALUE}" \
+  EVAL_VOCODER_DIR="${VOCODER_WEIGHTS_VALUE}" \
+  WITH_EVAL=1 \
+  WITH_AV_BENCHMARK="${with_av_benchmark}" \
+  bash drifting/scripts/resonate/prepare_runtime_assets.sh
+fi
 
 printf 'eval_config MODEL_PATH=%s\n' "${MODEL_PATH_VALUE}"
 printf 'eval_config OUTPUT_PATH=%s\n' "${OUTPUT_PATH_VALUE}"
+printf 'eval_config AUDIO_OUTPUT=%s\n' "${OUTPUT_PATH_VALUE}/audio"
+printf 'eval_config CACHE_OUTPUT=%s\n' "${OUTPUT_PATH_VALUE}/cache"
+printf 'eval_config METRICS_OUTPUT=%s\n' "${OUTPUT_PATH_VALUE}/cache/output_metrics.json"
+printf 'eval_config GT_CACHE=%s\n' "${GT_CACHE_VALUE}"
+printf 'eval_config GT_AUDIO=%s\n' "${GT_AUDIO_VALUE}"
 printf 'eval_config EVAL_TSV=%s\n' "${EVAL_TSV_VALUE}"
 printf 'eval_config EVAL_NPZ_DIR=%s\n' "${EVAL_NPZ_DIR_VALUE}"
 printf 'eval_config NUM_STEPS=%s\n' "${NUM_STEPS_VALUE}"
@@ -47,3 +70,13 @@ USE_ROPE="${USE_ROPE_VALUE}" \
 EVAL_LIMIT="${EVAL_LIMIT_VALUE}" \
 EVAL_SKIP_AV_BENCHMARK="${EVAL_SKIP_AV_BENCHMARK_VALUE}" \
 bash drifting/scripts/eval_drifting_checkpoint.sh
+
+if [[ "${EVAL_SKIP_AV_BENCHMARK_VALUE}" != "1" ]]; then
+  metrics_path="${OUTPUT_PATH_VALUE}/cache/output_metrics.json"
+  if [[ ! -s "${metrics_path}" ]]; then
+    printf 'ERROR: AV-Benchmark metrics missing after eval: %s\n' \
+      "${metrics_path}" >&2
+    exit 1
+  fi
+  printf 'eval_result METRICS=%s\n' "${metrics_path}"
+fi

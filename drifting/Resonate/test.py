@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import subprocess
@@ -275,6 +276,8 @@ def run_eval(args: argparse.Namespace) -> None:
             f"because the GT audio directory is missing: {args.gt_audio}. "
             f"Missing cache files: {missing_text}"
         )
+    pred_cache = args.output / "cache"
+    pred_cache.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         str(benchmark_entrypoint),
@@ -283,7 +286,7 @@ def run_eval(args: argparse.Namespace) -> None:
         "--pred_audio",
         str(args.output / "audio"),
         "--pred_cache",
-        str(args.output / "cache"),
+        str(pred_cache),
         f"--audio_length={args.duration:g}",
         "--recompute_pred_cache",
         "--skip_video_related",
@@ -307,7 +310,21 @@ def run_eval(args: argparse.Namespace) -> None:
         )
     log.info("Step 2/2: computing AV-Benchmark metrics")
     run_and_tee(command, args.output / "evaluate.log")
-    log.info("Step 2/2 complete: evaluate_log=%s", args.output / "evaluate.log")
+    output_metrics = pred_cache / "output_metrics.json"
+    if not output_metrics.is_file():
+        raise FileNotFoundError(
+            "AV-Benchmark exited without writing its metric result: "
+            f"{output_metrics}. Inspect {args.output / 'evaluate.log'}."
+        )
+    metrics = json.loads(output_metrics.read_text(encoding="utf-8"))
+    if not isinstance(metrics, dict) or not metrics:
+        raise ValueError(f"Invalid AV-Benchmark metric result: {output_metrics}")
+    log.info(
+        "Step 2/2 complete: cache=%s metrics=%s evaluate_log=%s",
+        pred_cache,
+        output_metrics,
+        args.output / "evaluate.log",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

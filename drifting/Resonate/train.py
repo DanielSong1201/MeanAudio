@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import csv
 import fcntl
+import json
 import logging
 import os
 import random
 import sys
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -89,6 +91,49 @@ def atomic_torch_save(payload: Any, path: Path) -> None:
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def atomic_write_json(payload: dict[str, Any], path: Path) -> None:
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        temporary_path.write_text(
+            json.dumps(payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def wait_for_eval_status(
+    path: Path,
+    *,
+    iteration: int,
+    poll_seconds: float,
+    timeout_minutes: float,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    while True:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and payload.get("iteration") == iteration
+            and isinstance(payload.get("success"), bool)
+        ):
+            return payload
+        if (
+            timeout_minutes > 0
+            and time.monotonic() - started >= timeout_minutes * 60
+        ):
+            raise TimeoutError(
+                f"Timed out waiting for eval status after {timeout_minutes:g} "
+                f"minutes: {path}"
+            )
+        time.sleep(poll_seconds)
 
 
 @contextmanager
@@ -1010,7 +1055,17 @@ def main() -> None:
 
     tqdm_position = int(os.environ.get("TQDM_POSITION", "0"))
     tqdm_desc = os.environ.get("TQDM_DESC", "resonate-drifting-train")
-    eval_failure_fatal = os.environ.get("EVAL_FAILURE_FATAL", "0") == "1"
+    eval_failure_fatal = os.environ.get("EVAL_FAILURE_FATAL", "1") == "1"
+    eval_completion_poll_seconds = float(
+        os.environ.get("EVAL_COMPLETION_POLL_SECONDS", "5")
+    )
+    eval_completion_timeout_minutes = float(
+        os.environ.get("EVAL_COMPLETION_TIMEOUT_MINUTES", "0")
+    )
+    if eval_completion_poll_seconds <= 0:
+        raise ValueError("EVAL_COMPLETION_POLL_SECONDS must be positive")
+    if eval_completion_timeout_minutes < 0:
+        raise ValueError("EVAL_COMPLETION_TIMEOUT_MINUTES must be non-negative")
     if os.environ.get("QUIET_CONSOLE_AFTER_TQDM", "0") == "1":
         disable_console_logging(logger)
     progress = tqdm(
@@ -1161,7 +1216,24 @@ def main() -> None:
             dist.barrier()
         if should_eval:
             console_states = suspend_console_logging(logger) if is_main else []
-            eval_error: Exception | None = None
+            eval_error: BaseException | None = None
+            eval_status_path = (
+                args.eval_output_root
+                / args.exp_id
+                / f"it_{iteration:08d}"
+                / "distributed_eval_status.json"
+            )
+            if is_main:
+                eval_status_path.unlink(missing_ok=True)
+                logger.info(
+                    "TRAIN_EVAL_START iteration=%d rank0_runs_eval=true "
+                    "other_ranks_wait=file_poll status=%s",
+                    iteration,
+                    eval_status_path,
+                )
+            if distributed:
+                dist.barrier()
+
             eval_weight_path = output_dir / f"{args.exp_id}_{iteration}.pth"
             if is_main:
                 if not eval_weight_path.exists():
@@ -1191,6 +1263,8 @@ def main() -> None:
             if distributed:
                 dist.barrier()
 
+            eval_success = True
+            eval_error_text = ""
             if is_main:
                 eval_environment = {
                     "GT_AUDIO": str(args.eval_gt_audio),
@@ -1222,15 +1296,44 @@ def main() -> None:
                             logger=logger,
                             stream_output=False,
                         )
-                except Exception as error:
+                except BaseException as error:
                     eval_error = error
+                    eval_success = False
+                    eval_error_text = f"{type(error).__name__}: {error}"
                     logger.exception(
                         "Periodic eval failed at iteration %d; fatal=%s",
                         iteration,
                         eval_failure_fatal,
                     )
+                finally:
+                    atomic_write_json(
+                        {
+                            "iteration": iteration,
+                            "success": eval_success,
+                            "error": eval_error_text,
+                            "checkpoint": str(eval_weight_path),
+                            "output": str(eval_status_path.parent),
+                        },
+                        eval_status_path,
+                    )
+
+            eval_status = wait_for_eval_status(
+                eval_status_path,
+                iteration=iteration,
+                poll_seconds=eval_completion_poll_seconds,
+                timeout_minutes=eval_completion_timeout_minutes,
+            )
             if distributed:
+                # The long wait above uses the filesystem, not NCCL. This
+                # short barrier only runs after rank0 has finished eval.
                 dist.barrier()
+            if is_main:
+                logger.info(
+                    "TRAIN_EVAL_STATUS iteration=%d success=%s error=%s",
+                    iteration,
+                    eval_status["success"],
+                    eval_status.get("error", ""),
+                )
 
             if args.eval_offload_train_state:
                 if is_main:
@@ -1251,8 +1354,15 @@ def main() -> None:
                 )
                 restore_console_logging(console_states)
                 progress.unpause()
-                if eval_error is not None and eval_failure_fatal:
+            if not bool(eval_status["success"]) and eval_failure_fatal:
+                progress.close()
+                cleanup_distributed(distributed)
+                if is_main and eval_error is not None:
                     raise eval_error
+                raise RuntimeError(
+                    f"Periodic eval failed at iteration {iteration}: "
+                    f"{eval_status.get('error', 'unknown error')}"
+                )
 
     progress.close()
     if distributed:

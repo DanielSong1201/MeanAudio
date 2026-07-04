@@ -111,14 +111,29 @@ bash drifting/scripts/resonate/train.sh
 metrics="${train_dir}/metrics.csv"
 train_log="${train_dir}/train.log"
 eval_log="${eval_dir}/it_00000002/evaluate.log"
+eval_status="${eval_dir}/it_00000002/distributed_eval_status.json"
 checkpoint="${train_dir}/${smoke_id}_2.pth"
 
-for path in "${metrics}" "${train_log}" "${eval_log}" "${checkpoint}"; do
+for path in \
+  "${metrics}" \
+  "${train_log}" \
+  "${eval_log}" \
+  "${eval_status}" \
+  "${checkpoint}"; do
   if [[ ! -f "${path}" ]]; then
     printf 'ERROR: smoke output missing: %s\n' "${path}" >&2
     exit 1
   fi
 done
+if ! grep -q '"success": true' "${eval_status}"; then
+  printf 'ERROR: eval status is not successful: %s\n' "${eval_status}" >&2
+  exit 1
+fi
+if [[ "${EVAL_SKIP_AV_BENCHMARK:-0}" != "1" ]] \
+  && [[ ! -s "${eval_dir}/it_00000002/cache/output_metrics.json" ]]; then
+  printf 'ERROR: smoke AV-Benchmark metrics are missing\n' >&2
+  exit 1
+fi
 if ! awk -F, 'NR > 1 && $1 == 3 {found=1} END {exit(found ? 0 : 1)}' "${metrics}"; then
   printf 'ERROR: training did not continue through iteration 3 after eval\n' >&2
   exit 1

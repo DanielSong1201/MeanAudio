@@ -694,6 +694,19 @@ default. The evaluation:
 4. writes FLAC files under the iteration-specific eval directory;
 5. calls `av-benchmark/evaluate.py` with the same audio-only settings as Flux.
 
+Only rank0 enters the evaluation subprocess. The other training ranks stop
+before the next iteration and poll
+`distributed_eval_status.json` on the filesystem. They do not enter a
+long-running NCCL barrier. After rank0 finishes, all ranks observe the status
+file and execute one short NCCL barrier before training resumes. This keeps all
+four ranks synchronized without making AV-Benchmark runtime count against the
+NCCL collective timeout.
+
+Evaluation failures are fatal by default (`EVAL_FAILURE_FATAL=1`). Training
+will not silently continue when audio generation succeeds but AV-Benchmark
+fails before writing its feature cache. Set `EVAL_FAILURE_FATAL=0` only when a
+deliberately best-effort evaluation is desired.
+
 Required evaluation assets are:
 
 ```text
@@ -718,9 +731,41 @@ The default outputs are:
 ```text
 exps/drifting_resonate/<exp_id>/
 exps/drifting_resonate_eval/<exp_id>/it_00010000/
+├── audio/
+├── cache/
+│   └── output_metrics.json
+├── distributed_eval_status.json
+├── eval_driver.log
+└── evaluate.log
 ```
 
-Evaluate a checkpoint manually with the same path:
+`cache/` also contains the PANN, VGGish, PaSST, and CLAP prediction
+features produced by AV-Benchmark. `output_metrics.json` is required for a
+successful full evaluation. If it is absent, inspect `eval_driver.log` first,
+then `evaluate.log`.
+
+```bash
+tail -n 200 \
+  exps/drifting_resonate_eval/<exp_id>/it_00010000/eval_driver.log
+tail -n 200 \
+  exps/drifting_resonate_eval/<exp_id>/it_00010000/evaluate.log
+```
+
+During a long evaluation, the default filesystem polling interval is five
+seconds and there is no polling timeout:
+
+```text
+EVAL_COMPLETION_POLL_SECONDS=5
+EVAL_COMPLETION_TIMEOUT_MINUTES=0
+```
+
+`0` means wait until rank0 finishes or the launcher terminates. A positive
+timeout is optional and independent of `DDP_TIMEOUT_MINUTES`.
+
+### Standalone checkpoint evaluation
+
+Evaluation does not require a training process or `torchrun`. Select one GPU,
+provide a weights-only or EMA checkpoint, and choose a separate output path:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -728,6 +773,30 @@ MODEL_PATH=exps/drifting_resonate/<exp_id>/<exp_id>_10000_ema.pth \
 OUTPUT_PATH=exps/drifting_resonate_eval/<exp_id>/manual_it10000 \
 bash drifting/scripts/resonate/eval_checkpoint.sh
 ```
+
+The standalone launcher prepares missing VAE, BigVGAN, and AV-Benchmark model
+assets before evaluation. It then verifies that this file exists:
+
+```text
+exps/drifting_resonate_eval/<exp_id>/manual_it10000/cache/output_metrics.json
+```
+
+Useful overrides:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+MODEL_PATH=/path/to/checkpoint.pth \
+OUTPUT_PATH=/path/to/eval-output \
+GT_CACHE=data/audiocaps/test-features \
+EVAL_LIMIT=100 \
+NUM_STEPS=1 \
+CFG_STRENGTH=4.5 \
+bash drifting/scripts/resonate/eval_checkpoint.sh
+```
+
+Remove `EVAL_LIMIT` for the complete test split. Setting
+`EVAL_SKIP_AV_BENCHMARK=1` performs generation only; in that mode `audio/` is
+written but `cache/output_metrics.json` is intentionally absent.
 
 ### 9. Train/eval smoke test
 
