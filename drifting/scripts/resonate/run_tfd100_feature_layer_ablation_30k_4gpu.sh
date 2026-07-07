@@ -3,6 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
+export SAVE_ITS="${SAVE_ITS:-${SAVE_INTERVAL:-10000}}"
+export EMA_DEVICE="${EMA_DEVICE:-cpu}"
+
+echo "ablation_config SAVE_ITS=${SAVE_ITS}"
+echo "ablation_config EMA_DEVICE=${EMA_DEVICE}"
+
 scripts=(
   "drifting/scripts/resonate/train_tfd100_anchor1_flow01_layers_current_30k_4gpu.sh"
   "drifting/scripts/resonate/train_tfd100_anchor1_flow01_layers_j5_j15_f17_30k_4gpu.sh"

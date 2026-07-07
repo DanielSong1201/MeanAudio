@@ -196,12 +196,19 @@ class ResonateFluxAudio(FluxAudio):
             )
 
         features: dict[str, torch.Tensor] = {}
+
+        def ordered_features() -> dict[str, torch.Tensor]:
+            # Preserve the caller's requested ordering for stable loss/log output.
+            return {name: features[name] for name in requested}
+
         text_f = conditions.text_f
         text_f_c = conditions.text_f_c
         latent = self.audio_input_proj(latent)
         latent_rot, text_rot = self._rotations(latent.shape[1], text_f.shape[1])
         if "audio_proj" in requested_set:
             features["audio_proj"] = latent
+            if len(features) == len(requested_set):
+                return ordered_features()
 
         global_c = self.t_embed(t).unsqueeze(1) + text_f_c.unsqueeze(1)
         extended_c = global_c
@@ -217,15 +224,18 @@ class ResonateFluxAudio(FluxAudio):
             name = f"joint_{index}"
             if name in requested_set:
                 features[name] = latent
+                if len(features) == len(requested_set):
+                    return ordered_features()
 
         for index, block in enumerate(self.fused_blocks):
             latent = block(latent, extended_c, latent_rot)
             name = f"fused_{index}"
             if name in requested_set:
                 features[name] = latent
+                if len(features) == len(requested_set):
+                    return ordered_features()
 
-        # Preserve the caller's requested ordering for stable loss/log output.
-        return {name: features[name] for name in requested}
+        return ordered_features()
 
     def load_weights(self, src_dict: Mapping[str, torch.Tensor] | Any) -> None:
         self.load_state_dict(_unwrap_state_dict(src_dict), strict=True)
