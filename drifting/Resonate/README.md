@@ -798,6 +798,46 @@ Remove `EVAL_LIMIT` for the complete test split. Setting
 `EVAL_SKIP_AV_BENCHMARK=1` performs generation only; in that mode `audio/` is
 written but `cache/output_metrics.json` is intentionally absent.
 
+### Released Resonate one-step iteration-0 baseline
+
+To measure the released `Resonate_GRPO.pth` before TFD training, run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+bash drifting/scripts/resonate/eval_resonate_grpo_it0_avbenchmark.sh
+```
+
+This experiment is fixed to one Euler step, CFG 4.5, the complete AudioCaps
+test split, and the TFD=100 experiment ID:
+
+```text
+resonate_lr1e6_tfd100_anchor1_flow01_hybridpos4_warmup1000_200k
+```
+
+Its output is recorded as iteration zero:
+
+```text
+exps/drifting_resonate_eval/
+  resonate_lr1e6_tfd100_anchor1_flow01_hybridpos4_warmup1000_200k/
+    it_00000000/
+      audio/
+      cache/output_metrics.json
+      eval_driver.log
+      evaluate.log
+```
+
+The parsed metrics are also appended to:
+
+```text
+exps/drifting_resonate/
+  resonate_lr1e6_tfd100_anchor1_flow01_hybridpos4_warmup1000_200k/
+    eval_metrics.csv
+```
+
+This makes the released model the `iteration=0` row for direct comparison
+with the periodic TFD checkpoints. A completed iteration-zero result is not
+rerun by default. Use `FORCE=1` only when deliberately replacing its output.
+
 ### 9. Train/eval smoke test
 
 The smoke test uses a new timestamped experiment. It trains iteration 1,
