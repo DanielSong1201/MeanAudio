@@ -5,7 +5,7 @@ This directory contains three launchers for the current FluxAudio teacher-featur
 ## Scripts
 
 - `train_pool4_hybridpos.sh`: paper-aligned pooling (`POOL_TOKENS=4`) with one real posterior positive plus three cached teacher positives.
-- `train_pool4_realpos.sh`: paper-aligned pooling with only real posterior positives. This isolates whether cached teacher positives are pulling the student toward a mismatched distribution.
+- `train_pool4_realpos.sh`: paper-aligned pooling with one real posterior positive plus three cached FluxAudio-S teacher positives. If the FluxAudio positive bank is missing, the script builds it in a separate directory without overwriting the existing MeanAudio-L bank.
 - `train_pool64_hybridpos_control.sh`: current pooling control (`POOL_TOKENS=64`) with hybrid positives.
 
 ## Usage
@@ -35,17 +35,33 @@ EXP_ID=my_ablation_run \
 ITERATIONS=50000 \
 BATCH_SIZE=1 \
 LAMBDA_FLOW=0.05 \
-LAMBDA_TFD=1 \
+LAMBDA_TFD=100 \
 LAMBDA_ANCHOR=1 \
 CUDA_VISIBLE_DEVICES=2,3 \
 NPROC_PER_NODE=2 \
 bash drifting/scripts/ablation/train_pool4_realpos.sh
 ```
 
-Hybrid-positive scripts expect:
+MeanAudio-L hybrid-positive scripts expect:
 
 ```text
 data/audiocaps/train-teacher-positives-meanaudio-l-full-25step-cfg6/complete.json
 ```
 
 Override `TEACHER_POSITIVE_DIR` if the bank is stored elsewhere.
+
+`train_pool4_realpos.sh` uses a separate FluxAudio-S bank by default:
+
+```text
+data/audiocaps/train-teacher-positives-fluxaudio-s-full-25step-cfg6/complete.json
+```
+
+This path is intentionally different from the existing MeanAudio-L positive bank.
+
+All three launchers default to the `flow005+tfd100+anchor1` setting:
+
+```text
+LAMBDA_FLOW=0.05
+LAMBDA_TFD=100
+LAMBDA_ANCHOR=1
+```

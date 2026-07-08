@@ -20,6 +20,7 @@ from drifting.flux.train import (
     setup_distributed,
     setup_logger,
 )
+from meanaudio.model.flow_matching import FlowMatching
 from meanaudio.model.mean_flow import MeanFlow
 from meanaudio.model.networks import get_mean_audio
 
@@ -51,6 +52,7 @@ def main() -> None:
     parser.add_argument("--train-split", default="AudioCaps_npz")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--teacher-weights", type=Path, default=Path("weights/meanaudio_l_full.pth"))
+    parser.add_argument("--teacher-variant", choices=["meanaudio_l", "fluxaudio_s"], default="meanaudio_l")
     parser.add_argument("--target-latent-mean", type=Path, default=Path("sets/latent_mean.pt"))
     parser.add_argument("--target-latent-std", type=Path, default=Path("sets/latent_std.pt"))
     parser.add_argument("--positives-per-condition", type=int, default=3)
@@ -69,8 +71,7 @@ def main() -> None:
         raise ValueError("--num-steps must be >= 1")
     if not args.teacher_weights.exists():
         raise FileNotFoundError(
-            f"Missing MeanAudio-L checkpoint: {args.teacher_weights}. Download it from "
-            "https://huggingface.co/AndreasXi/MeanAudio/resolve/main/meanaudio_l_full.pth"
+            f"Missing {args.teacher_variant} checkpoint: {args.teacher_weights}."
         )
 
     distributed, rank, local_rank, world_size = setup_distributed()
@@ -91,7 +92,7 @@ def main() -> None:
     use_amp = args.amp and device.type == "cuda"
     model_dtype = torch.bfloat16 if use_amp else torch.float32
     teacher = get_mean_audio(
-        "meanaudio_l",
+        args.teacher_variant,
         use_rope=args.use_rope,
         text_c_dim=512,
     ).to(device=device, dtype=model_dtype)
@@ -106,7 +107,11 @@ def main() -> None:
         dtype=model_dtype,
     )
     autocast_dtype = torch.bfloat16 if use_amp else torch.float32
-    mean_flow = MeanFlow(steps=args.num_steps)
+    sampler = (
+        FlowMatching(num_steps=args.num_steps)
+        if args.teacher_variant == "fluxaudio_s"
+        else MeanFlow(steps=args.num_steps)
+    )
 
     config = {
         "version": 2,
@@ -116,8 +121,8 @@ def main() -> None:
         "num_items": len(dataset),
         "positives_per_condition": args.positives_per_condition,
         "teacher_weights": str(args.teacher_weights),
-        "teacher_variant": "meanaudio_l",
-        "sampler": "meanflow",
+        "teacher_variant": args.teacher_variant,
+        "sampler": "flowmatching" if args.teacher_variant == "fluxaudio_s" else "meanflow",
         "num_steps": args.num_steps,
         "cfg_strength": args.cfg_strength,
         "seed": args.seed,
@@ -177,15 +182,24 @@ def main() -> None:
         ):
             conditions = teacher.preprocess_conditions(text_f, text_f_c)
             empty_conditions = teacher.get_empty_conditions(args.positives_per_condition)
-            cfg_ode_wrapper = lambda t, r, x: teacher.ode_wrapper(
-                t,
-                r,
-                x,
-                conditions,
-                empty_conditions,
-                args.cfg_strength,
-            )
-            teacher_latents = mean_flow.to_data(cfg_ode_wrapper, x_noise)
+            if args.teacher_variant == "fluxaudio_s":
+                cfg_ode_wrapper = lambda t, x: teacher.ode_wrapper(
+                    t,
+                    x,
+                    conditions,
+                    empty_conditions,
+                    args.cfg_strength,
+                )
+            else:
+                cfg_ode_wrapper = lambda t, r, x: teacher.ode_wrapper(
+                    t,
+                    r,
+                    x,
+                    conditions,
+                    empty_conditions,
+                    args.cfg_strength,
+                )
+            teacher_latents = sampler.to_data(cfg_ode_wrapper, x_noise)
             raw_latents = (
                 teacher_latents * teacher.latent_std
                 + teacher.latent_mean
