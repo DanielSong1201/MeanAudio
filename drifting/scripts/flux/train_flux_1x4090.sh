@@ -7,6 +7,9 @@ ulimit -c 0
 
 cd "$(dirname "$0")/../../.."
 
+REPO_ROOT="$(pwd)"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 EXP_ID_VALUE="${EXP_ID:-flux_drifting_s_1x4090}"

@@ -7,6 +7,9 @@ ulimit -c 0
 
 cd "$(dirname "$0")/../../.."
 
+REPO_ROOT="$(pwd)"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-180}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
