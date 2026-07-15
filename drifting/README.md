@@ -332,6 +332,95 @@ AUTO_RESUME=0 bash drifting/scripts/flux/train_flux_1x4090.sh
 `ITERATIONS` is the final target iteration. If `60000.pth` exists and
 `ITERATIONS=100000`, training runs from `60001` to `100000`.
 
+### Explicit checkpoint branching
+
+An explicit checkpoint can be resumed into a new `EXP_ID` while preserving the
+source iteration. `RESUME_PATH` takes precedence over the legacy same-`EXP_ID`
+auto-resume search. When `RESUME_PATH` is unset, all legacy behavior above is
+unchanged.
+
+Interfaces:
+
+```text
+RESUME_PATH=/path/to/checkpoint.pth
+RESUME_ITERATION=40000       # optional when encoded in the filename or full state
+RESUME_EMA_PATH=/path/to/ema.pth
+RESET_OPTIMIZER=0            # 0=restore when available, 1=fresh AdamW
+ITERATIONS=100000            # absolute target, not additional iterations
+```
+
+To preserve optimizer state from arbitrary historical iterations, enable
+numbered full-state archives during the source run. The interval must be a
+multiple of `SAVE_INTERVAL`:
+
+```bash
+SAVE_INTERVAL=1000 \
+ARCHIVE_TRAIN_STATE_INTERVAL=10000 \
+bash drifting/scripts/flux/train_flux_2x4090.sh
+```
+
+This keeps the normal rolling state and additionally writes:
+
+```text
+<exp_id>_10000_train_state.pth
+<exp_id>_20000_train_state.pth
+...
+```
+
+The default `ARCHIVE_TRAIN_STATE_INTERVAL=0` writes no numbered full states,
+so storage and legacy save behavior remain unchanged. Numbered full states are
+substantially larger than weights-only checkpoints because they include AdamW
+moments; choose a coarse archive interval and monitor disk usage.
+
+Example: branch from iteration 40000, remove the flow loss, keep optimizer and
+EMA state, write into a new experiment, and continue at iteration 40001:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+NPROC_PER_NODE=2 \
+EXP_ID=flux_from40k_tfd_only_keepopt \
+RESUME_PATH=exps/drifting_flux/source_exp/source_exp_40000_train_state.pth \
+RESUME_ITERATION=40000 \
+RESET_OPTIMIZER=0 \
+ITERATIONS=100000 \
+LAMBDA_FLOW=0 \
+LAMBDA_TFD=100 \
+LAMBDA_ANCHOR=1 \
+POOL_TOKENS=4 \
+bash drifting/scripts/ablation/train_pool4_hybridpos.sh
+```
+
+Set `RESET_OPTIMIZER=1` to keep the same student/EMA weights and iteration but
+start with a fresh AdamW optimizer using the new command-line configuration.
+With `RESET_OPTIMIZER=0`, Adam moments and saved optimizer parameter groups are
+retained. The current `LEARNING_RATE` is applied by the training loop at the
+first resumed step, but changing optimizer-level settings such as weight decay
+or Adam betas requires `RESET_OPTIMIZER=1`.
+
+A weights-only checkpoint also supports iteration-preserving branching, but it
+cannot restore optimizer state:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+NPROC_PER_NODE=2 \
+EXP_ID=flux_from40k_tfd_only_freshopt \
+RESUME_PATH=exps/drifting_flux/source_exp/source_exp_40000.pth \
+RESUME_ITERATION=40000 \
+RESUME_EMA_PATH=exps/drifting_flux/source_exp/source_exp_40000_ema.pth \
+RESET_OPTIMIZER=1 \
+ITERATIONS=100000 \
+LAMBDA_FLOW=0 \
+LAMBDA_TFD=100 \
+LAMBDA_ANCHOR=1 \
+POOL_TOKENS=4 \
+bash drifting/scripts/ablation/train_pool4_hybridpos.sh
+```
+
+Both examples log `TRAIN_START ... resume_iteration=40000
+start_iteration=40001`, and the first completed step (`40001`) is written to
+the new experiment's `metrics.csv` even when it is not divisible by
+`LOG_INTERVAL`.
+
 ## 9. Logs and Outputs
 
 ```text
@@ -343,6 +432,7 @@ exps/drifting_flux/<exp_id>/<exp_id>_<iteration>_ema.pth
 exps/drifting_flux/<exp_id>/<exp_id>_last.pth
 exps/drifting_flux/<exp_id>/<exp_id>_ema_last.pth
 exps/drifting_flux/<exp_id>/<exp_id>_train_state_last.pth
+exps/drifting_flux/<exp_id>/<exp_id>_<iteration>_train_state.pth  # optional archive
 ```
 
 Training metrics are shown in the tqdm postfix. They are also written to

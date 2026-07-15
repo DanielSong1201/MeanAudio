@@ -308,6 +308,12 @@ latents processed by the model inside each condition batch.
 Flux training auto-resumes by default. Use a new `EXP_ID` and `AUTO_RESUME=0`
 for a deliberately fresh run.
 
+To branch from a specific checkpoint into a new experiment while preserving
+its iteration, use `RESUME_PATH`, optional `RESUME_ITERATION` and
+`RESUME_EMA_PATH`, and `RESET_OPTIMIZER=0|1`. Full examples, including a 40k
+checkpoint continued as iteration 40001 with `LAMBDA_FLOW=0`, are documented
+in the explicit checkpoint branching section of `drifting/README.md`.
+
 ## 8. Flux validation and evaluation
 
 Periodic evaluation defaults to every 10k optimizer iterations:

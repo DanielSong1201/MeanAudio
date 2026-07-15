@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 from contextlib import contextmanager
 from datetime import timedelta
@@ -47,9 +48,67 @@ def load_training_state(path: Path, map_location: str | torch.device) -> dict[st
         state = torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
         state = torch.load(path, map_location=map_location)
-    if not isinstance(state, dict) or "iteration" not in state:
+    required_keys = {"iteration", "student", "optimizer"}
+    if not isinstance(state, dict) or not required_keys.issubset(state):
         raise ValueError(f"Invalid training state: {path}")
     return state
+
+
+_WEIGHTS_ITERATION_RE = re.compile(r"_(\d+)(?:_ema)?\.pth$")
+
+
+def infer_weights_iteration(path: Path) -> int | None:
+    match = _WEIGHTS_ITERATION_RE.search(path.name)
+    return None if match is None else int(match.group(1))
+
+
+def infer_ema_checkpoint_path(path: Path) -> Path | None:
+    name = path.name
+    if name.endswith("_ema.pth") or name.endswith("_ema_last.pth"):
+        return None
+    if name.endswith("_last.pth"):
+        return path.with_name(f"{name[:-len('_last.pth')]}_ema_last.pth")
+    if name.endswith(".pth"):
+        return path.with_name(f"{name[:-len('.pth')]}_ema.pth")
+    return None
+
+
+def resolve_explicit_resume(
+    path: Path,
+    requested_iteration: int | None,
+) -> tuple[int, Path, str]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Explicit resume checkpoint does not exist: {path}")
+
+    try:
+        state = load_training_state(path, "cpu")
+    except ValueError:
+        state = None
+
+    if state is not None:
+        state_iteration = int(state["iteration"])
+        del state
+        if requested_iteration is not None and requested_iteration != state_iteration:
+            raise ValueError(
+                "--resume-iteration does not match the full training state: "
+                f"requested={requested_iteration}, checkpoint={state_iteration}, path={path}"
+            )
+        return state_iteration, path, "full"
+
+    inferred_iteration = infer_weights_iteration(path)
+    if requested_iteration is None:
+        if inferred_iteration is None:
+            raise ValueError(
+                "A weights-only resume checkpoint must contain an '_<iteration>.pth' suffix "
+                f"or be accompanied by --resume-iteration: {path}"
+            )
+        requested_iteration = inferred_iteration
+    elif inferred_iteration is not None and requested_iteration != inferred_iteration:
+        raise ValueError(
+            "--resume-iteration does not match the weights checkpoint filename: "
+            f"requested={requested_iteration}, filename={inferred_iteration}, path={path}"
+        )
+    return requested_iteration, path, "weights"
 
 
 def to_cpu_state(value: Any) -> Any:
@@ -104,6 +163,7 @@ def save_training_state(
     optimizer: torch.optim.Optimizer,
     ema: ExponentialMovingAverage | None,
     sampler_epoch: int,
+    archive_path: Path | None = None,
 ) -> None:
     state = {
         "version": 1,
@@ -114,6 +174,8 @@ def save_training_state(
         "sampler_epoch": sampler_epoch,
     }
     atomic_torch_save(state, path)
+    if archive_path is not None:
+        atomic_torch_save(state, archive_path)
 
 
 class AudioCapsNpzDataset(Dataset):
@@ -608,6 +670,41 @@ def main() -> None:
     parser.add_argument("--weights-dir", type=Path, default=Path("weights"))
     parser.add_argument("--teacher-weights", type=Path, default=Path("weights/fluxaudio_s_full.pth"))
     parser.add_argument("--student-init", type=Path, default=Path("weights/fluxaudio_s_full.pth"))
+    parser.add_argument(
+        "--resume-path",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit full training-state or weights-only checkpoint to resume from. "
+            "This takes precedence over EXP_ID auto-resume and supports branching into a new EXP_ID."
+        ),
+    )
+    parser.add_argument(
+        "--resume-iteration",
+        type=int,
+        default=None,
+        help=(
+            "Iteration represented by a weights-only --resume-path. It is inferred from an "
+            "_<iteration>.pth suffix when omitted. Full training states use their internal iteration."
+        ),
+    )
+    parser.add_argument(
+        "--resume-ema-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional EMA checkpoint paired with a weights-only --resume-path. If omitted, a sibling "
+            "_<iteration>_ema.pth or _ema_last.pth file is used when available."
+        ),
+    )
+    parser.add_argument(
+        "--reset-optimizer",
+        action="store_true",
+        help=(
+            "Do not restore AdamW state from a full training checkpoint. Student/EMA weights and "
+            "the checkpoint iteration are still preserved. Weights-only resumes already use a fresh optimizer."
+        ),
+    )
     parser.add_argument("--latent-mean", type=Path, default=Path("sets/latent_mean.pt"))
     parser.add_argument("--latent-std", type=Path, default=Path("sets/latent_std.pt"))
     parser.add_argument("--batch-size", type=int, default=4)
@@ -639,6 +736,15 @@ def main() -> None:
     parser.add_argument("--anchor-margin-alpha", type=float, default=0.5)
     parser.add_argument("--log-interval", type=int, default=20)
     parser.add_argument("--save-interval", type=int, default=1000)
+    parser.add_argument(
+        "--archive-training-state-interval",
+        type=int,
+        default=0,
+        help=(
+            "Also preserve a numbered full training state every N iterations, for example "
+            "<exp_id>_40000_train_state.pth. Zero disables archives and keeps only _train_state_last.pth."
+        ),
+    )
     parser.add_argument("--eval-interval", type=int, default=10000, help="Run full evaluation every N iterations; set 0 to disable.")
     parser.add_argument("--eval-output-root", type=Path, default=Path("exps/drifting_flux_eval"))
     parser.add_argument("--eval-gt-cache", type=Path, default=Path("data/audiocaps/test-features"))
@@ -685,6 +791,25 @@ def main() -> None:
         raise ValueError("--ema-update-interval must be >= 1")
     if args.lr_warmup_steps < 0:
         raise ValueError("--lr-warmup-steps must be >= 0")
+    if args.save_interval < 1:
+        raise ValueError("--save-interval must be >= 1")
+    if args.archive_training_state_interval < 0:
+        raise ValueError("--archive-training-state-interval must be >= 0")
+    if (
+        args.archive_training_state_interval > 0
+        and args.archive_training_state_interval % args.save_interval != 0
+    ):
+        raise ValueError(
+            "--archive-training-state-interval must be a multiple of --save-interval"
+        )
+    if args.resume_iteration is not None and args.resume_iteration < 0:
+        raise ValueError("--resume-iteration must be >= 0")
+    if args.resume_iteration is not None and args.resume_path is None:
+        raise ValueError("--resume-iteration requires --resume-path")
+    if args.resume_ema_path is not None and args.resume_path is None:
+        raise ValueError("--resume-ema-path requires --resume-path")
+    if args.resume_ema_path is not None and not args.resume_ema_path.is_file():
+        raise FileNotFoundError(f"Explicit EMA resume checkpoint does not exist: {args.resume_ema_path}")
     if args.samples_per_condition < 1:
         raise ValueError("--samples-per-condition must be >= 1")
     if args.teacher_positive_dir is not None and args.teacher_positive_count < 1:
@@ -710,7 +835,35 @@ def main() -> None:
     resume_path: Path | None = None
     resume_mode: str | None = None
     training_state_path = output_dir / f"{args.exp_id}_train_state_last.pth"
-    if args.auto_resume:
+    if args.resume_path is not None:
+        explicit: tuple[int, Path, str] | None = None
+        if is_main:
+            explicit = resolve_explicit_resume(args.resume_path, args.resume_iteration)
+        if distributed:
+            payload: list[tuple[int, str, str] | None] = [
+                None if explicit is None else (explicit[0], str(explicit[1]), explicit[2])
+            ]
+            dist.broadcast_object_list(payload, src=0)
+            explicit_payload = payload[0]
+            explicit = (
+                None
+                if explicit_payload is None
+                else (explicit_payload[0], Path(explicit_payload[1]), explicit_payload[2])
+            )
+        if explicit is None:
+            raise RuntimeError("Rank 0 did not resolve the explicit resume checkpoint.")
+        resume_iteration, resume_path, resume_mode = explicit
+        logger.info(
+            "Explicit resume selected: it=%d mode=%s path=%s new_exp_id=%s reset_optimizer=%s",
+            resume_iteration,
+            resume_mode,
+            resume_path,
+            args.exp_id,
+            args.reset_optimizer,
+        )
+        if args.resume_ema_path is not None and resume_mode != "weights":
+            raise ValueError("--resume-ema-path is only valid with a weights-only --resume-path")
+    elif args.auto_resume:
         latest: tuple[int, Path, str] | None = None
         if is_main:
             latest_weights = find_latest_weight_checkpoint(output_dir, args.exp_id)
@@ -844,12 +997,17 @@ def main() -> None:
             logger.info("Restoring EMA state from full training checkpoint.")
             ema.load_state_dict(resume_state["ema"])
         elif resume_path is not None:
-            ema_resume_path = output_dir / f"{args.exp_id}_{resume_iteration}_ema.pth"
-            if ema_resume_path.exists():
+            ema_resume_path = args.resume_ema_path
+            if ema_resume_path is None:
+                ema_resume_path = infer_ema_checkpoint_path(resume_path)
+            if ema_resume_path is not None and ema_resume_path.exists():
                 logger.info("Loading resumed EMA weights: %s", ema_resume_path)
                 ema.load_state_dict(load_torch(ema_resume_path, "cpu"))
             else:
-                logger.warning("EMA checkpoint not found at %s; initializing EMA from resumed student weights.", ema_resume_path)
+                logger.warning(
+                    "EMA checkpoint not found at %s; initializing EMA from resumed student weights.",
+                    ema_resume_path,
+                )
         logger.info(
             "EMA enabled on rank0 only: decay=%.6f start=%d update_interval=%d "
             "device=%s eval_use_ema=%s",
@@ -863,10 +1021,21 @@ def main() -> None:
         logger.info("EMA disabled on non-main rank; rank0 owns the only EMA copy.")
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    if resume_state is not None:
+    if resume_state is not None and not args.reset_optimizer:
         optimizer.load_state_dict(resume_state["optimizer"])
         move_optimizer_state(optimizer, device)
         logger.info("Restored optimizer state from iteration %d.", resume_iteration)
+    elif resume_state is not None:
+        logger.info(
+            "RESET_OPTIMIZER enabled: initialized a fresh AdamW optimizer while preserving "
+            "student/EMA weights and resume_iteration=%d.",
+            resume_iteration,
+        )
+    elif resume_path is not None:
+        logger.info(
+            "Weights-only resume uses a fresh AdamW optimizer at resume_iteration=%d.",
+            resume_iteration,
+        )
     criterion = TeacherFeatureDriftingLoss(
         radii=parse_radii(args.radii),
         pool_tokens=args.pool_tokens,
@@ -981,7 +1150,7 @@ def main() -> None:
         last_completed_iteration = iteration
         progress.update(1)
 
-        should_log = iteration == 1 or iteration % args.log_interval == 0
+        should_log = iteration == start_iteration or iteration % args.log_interval == 0
         if should_log:
             reduced_total_loss = reduce_scalar(total_loss, distributed=distributed, world_size=world_size)
             reduced_flow_loss = reduce_scalar(loss_parts["flow_loss"], distributed=distributed, world_size=world_size)
@@ -1027,6 +1196,14 @@ def main() -> None:
                     ema_weight_path = output_dir / f"{args.exp_id}_{iteration}_ema.pth"
                     atomic_torch_save(ema.state_dict(), ema_weight_path)
                     logger.info("Saved EMA weights to %s", ema_weight_path)
+                archive_training_state_path = None
+                if (
+                    args.archive_training_state_interval > 0
+                    and iteration % args.archive_training_state_interval == 0
+                ):
+                    archive_training_state_path = (
+                        output_dir / f"{args.exp_id}_{iteration}_train_state.pth"
+                    )
                 save_training_state(
                     training_state_path,
                     iteration=iteration,
@@ -1034,8 +1211,14 @@ def main() -> None:
                     optimizer=optimizer,
                     ema=ema,
                     sampler_epoch=sampler_epoch,
+                    archive_path=archive_training_state_path,
                 )
                 logger.info("Saved resumable training state to %s", training_state_path)
+                if archive_training_state_path is not None:
+                    logger.info(
+                        "Archived numbered training state to %s",
+                        archive_training_state_path,
+                    )
             logger.info("CHECKPOINT_SAVE_DONE iteration=%d", iteration)
         if distributed and should_save:
             dist.barrier()

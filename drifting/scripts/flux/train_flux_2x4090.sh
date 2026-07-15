@@ -32,6 +32,7 @@ LEARNING_RATE_VALUE="${LEARNING_RATE:-5e-5}"
 LR_WARMUP_STEPS_VALUE="${LR_WARMUP_STEPS:-500}"
 LOG_INTERVAL_VALUE="${LOG_INTERVAL:-20}"
 SAVE_INTERVAL_VALUE="${SAVE_INTERVAL:-1000}"
+ARCHIVE_TRAIN_STATE_INTERVAL_VALUE="${ARCHIVE_TRAIN_STATE_INTERVAL:-0}"
 EVAL_INTERVAL_VALUE="${EVAL_INTERVAL:-10000}"
 EVAL_OUTPUT_ROOT_VALUE="${EVAL_OUTPUT_ROOT:-exps/drifting_flux_eval}"
 EVAL_GT_CACHE_VALUE="${EVAL_GT_CACHE:-data/audiocaps/test-features}"
@@ -52,9 +53,29 @@ TEACHER_POSITIVE_DIR_VALUE="${TEACHER_POSITIVE_DIR:-}"
 TEACHER_POSITIVE_COUNT_VALUE="${TEACHER_POSITIVE_COUNT:-3}"
 EFFECTIVE_BATCH_SIZE_VALUE=$((BATCH_SIZE_VALUE * NPROC_PER_NODE_VALUE))
 AUTO_RESUME_VALUE="${AUTO_RESUME:-1}"
+RESUME_PATH_VALUE="${RESUME_PATH:-}"
+RESUME_ITERATION_VALUE="${RESUME_ITERATION:-}"
+RESUME_EMA_PATH_VALUE="${RESUME_EMA_PATH:-}"
+RESET_OPTIMIZER_VALUE="${RESET_OPTIMIZER:-0}"
 AUTO_RESUME_ARGS=()
 if [[ "${AUTO_RESUME_VALUE}" == "0" ]]; then
   AUTO_RESUME_ARGS=(--no-auto-resume)
+fi
+RESUME_ARGS=()
+if [[ -n "${RESUME_PATH_VALUE}" ]]; then
+  RESUME_ARGS+=(--resume-path "${RESUME_PATH_VALUE}")
+fi
+if [[ -n "${RESUME_ITERATION_VALUE}" ]]; then
+  RESUME_ARGS+=(--resume-iteration "${RESUME_ITERATION_VALUE}")
+fi
+if [[ -n "${RESUME_EMA_PATH_VALUE}" ]]; then
+  RESUME_ARGS+=(--resume-ema-path "${RESUME_EMA_PATH_VALUE}")
+fi
+if [[ "${RESET_OPTIMIZER_VALUE}" == "1" ]]; then
+  RESUME_ARGS+=(--reset-optimizer)
+elif [[ "${RESET_OPTIMIZER_VALUE}" != "0" ]]; then
+  printf 'ERROR: RESET_OPTIMIZER must be 0 or 1, got %s.\n' "${RESET_OPTIMIZER_VALUE}" >&2
+  exit 1
 fi
 TEACHER_POSITIVE_ARGS=()
 if [[ -n "${TEACHER_POSITIVE_DIR_VALUE}" ]]; then
@@ -98,6 +119,7 @@ printf 'train_config LEARNING_RATE=%s\n' "${LEARNING_RATE_VALUE}"
 printf 'train_config LR_WARMUP_STEPS=%s\n' "${LR_WARMUP_STEPS_VALUE}"
 printf 'train_config LOG_INTERVAL=%s\n' "${LOG_INTERVAL_VALUE}"
 printf 'train_config SAVE_INTERVAL=%s\n' "${SAVE_INTERVAL_VALUE}"
+printf 'train_config ARCHIVE_TRAIN_STATE_INTERVAL=%s\n' "${ARCHIVE_TRAIN_STATE_INTERVAL_VALUE}"
 printf 'train_config EVAL_INTERVAL=%s\n' "${EVAL_INTERVAL_VALUE}"
 printf 'train_config EVAL_OUTPUT_ROOT=%s\n' "${EVAL_OUTPUT_ROOT_VALUE}"
 printf 'train_config EVAL_GT_CACHE=%s\n' "${EVAL_GT_CACHE_VALUE}"
@@ -118,6 +140,10 @@ printf 'train_config MODEL_SAMPLES_PER_GPU=%s\n' "$((BATCH_SIZE_VALUE * SAMPLES_
 printf 'train_config TEACHER_POSITIVE_DIR=%s\n' "${TEACHER_POSITIVE_DIR_VALUE:-disabled}"
 printf 'train_config TEACHER_POSITIVE_COUNT=%s\n' "${TEACHER_POSITIVE_COUNT_VALUE}"
 printf 'train_config AUTO_RESUME=%s\n' "${AUTO_RESUME_VALUE}"
+printf 'train_config RESUME_PATH=%s\n' "${RESUME_PATH_VALUE:-disabled}"
+printf 'train_config RESUME_ITERATION=%s\n' "${RESUME_ITERATION_VALUE:-infer}"
+printf 'train_config RESUME_EMA_PATH=%s\n' "${RESUME_EMA_PATH_VALUE:-auto}"
+printf 'train_config RESET_OPTIMIZER=%s\n' "${RESET_OPTIMIZER_VALUE}"
 printf 'train_config USE_ROPE=%s\n' "1"
 printf 'train_config AMP=%s\n' "1"
 
@@ -133,6 +159,7 @@ torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" drifting/flux/t
   --lr-warmup-steps "${LR_WARMUP_STEPS_VALUE}" \
   --log-interval "${LOG_INTERVAL_VALUE}" \
   --save-interval "${SAVE_INTERVAL_VALUE}" \
+  --archive-training-state-interval "${ARCHIVE_TRAIN_STATE_INTERVAL_VALUE}" \
   --eval-interval "${EVAL_INTERVAL_VALUE}" \
   --eval-output-root "${EVAL_OUTPUT_ROOT_VALUE}" \
   --eval-gt-cache "${EVAL_GT_CACHE_VALUE}" \
@@ -149,7 +176,8 @@ torchrun --standalone --nproc_per_node="${NPROC_PER_NODE_VALUE}" drifting/flux/t
   --feature-noise "${FEATURE_NOISE_VALUE}" \
   --pool-tokens "${POOL_TOKENS_VALUE}" \
   --samples-per-condition "${SAMPLES_PER_CONDITION_VALUE}" \
-  "${TEACHER_POSITIVE_ARGS[@]}" \
+  ${TEACHER_POSITIVE_ARGS[@]+"${TEACHER_POSITIVE_ARGS[@]}"} \
+  ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
   --use-rope \
   --amp \
-  "${AUTO_RESUME_ARGS[@]}"
+  ${AUTO_RESUME_ARGS[@]+"${AUTO_RESUME_ARGS[@]}"}
