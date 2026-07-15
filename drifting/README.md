@@ -4,6 +4,10 @@ This document describes a minimal, hardware-agnostic setup for running the
 DriftingAudio scripts in this repository. It covers environment setup, assets,
 sanity checks, training, sweeps, checkpoint resume, and evaluation.
 
+For the complete GPU/CUDA-focused Python environment, including pinned
+PyTorch versions, Flux and Resonate validation, training, and AV-Benchmark
+evaluation, see [`README_ENVIRONMENT.md`](README_ENVIRONMENT.md).
+
 Run all commands from the MeanAudio repository root unless noted otherwise:
 
 ```bash
@@ -38,14 +42,18 @@ git pull --ff-only origin drifting
 
 ## 2. Create the Python Environment
 
-Use Python 3.11. Install the PyTorch build matching your CUDA driver and cluster
-policy. The command below follows the upstream README CUDA 11.8 example:
+Use Python 3.11. The canonical GPU/CUDA setup, compatibility explanation, and
+verification commands are in [`README_ENVIRONMENT.md`](README_ENVIRONMENT.md).
+The current unified Flux and Resonate environment uses the repository-pinned
+PyTorch 2.5.1 CUDA 12.4 wheels:
 
 ```bash
 conda create -n meanaudio python=3.11 -y
 conda activate meanaudio
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 --upgrade
-pip install -e .
+python -m pip install --upgrade pip wheel
+python -m pip install --no-cache-dir -r drifting/Resonate/requirements.txt
+python -m pip install -e .
+python -m pip check
 ```
 
 Check the environment:
