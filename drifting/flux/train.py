@@ -676,7 +676,8 @@ def main() -> None:
         default=None,
         help=(
             "Explicit full training-state or weights-only checkpoint to resume from. "
-            "This takes precedence over EXP_ID auto-resume and supports branching into a new EXP_ID."
+            "With auto-resume enabled, this is a fallback used only when the target EXP_ID has no "
+            "checkpoint. Set --no-auto-resume to select this path directly."
         ),
     )
     parser.add_argument(
@@ -701,8 +702,10 @@ def main() -> None:
         "--reset-optimizer",
         action="store_true",
         help=(
-            "Do not restore AdamW state from a full training checkpoint. Student/EMA weights and "
-            "the checkpoint iteration are still preserved. Weights-only resumes already use a fresh optimizer."
+            "Do not restore AdamW state when the explicit --resume-path fallback is a full training "
+            "checkpoint. Same-exp-id auto-resume always restores its optimizer state. Student/EMA "
+            "weights and the checkpoint iteration are still preserved. Weights-only resumes already "
+            "use a fresh optimizer."
         ),
     )
     parser.add_argument("--latent-mean", type=Path, default=Path("sets/latent_mean.pt"))
@@ -766,7 +769,15 @@ def main() -> None:
     parser.add_argument("--ema-device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--eval-raw", dest="eval_use_ema", action="store_false", help="Evaluate raw student weights instead of EMA weights.")
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
-    parser.add_argument("--no-auto-resume", dest="auto_resume", action="store_false", help="Start from student init even if exp-id checkpoints exist.")
+    parser.add_argument(
+        "--no-auto-resume",
+        dest="auto_resume",
+        action="store_false",
+        help=(
+            "Skip the same-exp-id checkpoint lookup. If --resume-path is set, use it directly; "
+            "otherwise start from student init."
+        ),
+    )
     parser.set_defaults(eval_offload_train_state=True)
     parser.set_defaults(ema=True, eval_use_ema=True, auto_resume=True)
     args = parser.parse_args()
@@ -808,8 +819,6 @@ def main() -> None:
         raise ValueError("--resume-iteration requires --resume-path")
     if args.resume_ema_path is not None and args.resume_path is None:
         raise ValueError("--resume-ema-path requires --resume-path")
-    if args.resume_ema_path is not None and not args.resume_ema_path.is_file():
-        raise FileNotFoundError(f"Explicit EMA resume checkpoint does not exist: {args.resume_ema_path}")
     if args.samples_per_condition < 1:
         raise ValueError("--samples-per-condition must be >= 1")
     if args.teacher_positive_dir is not None and args.teacher_positive_count < 1:
@@ -834,36 +843,9 @@ def main() -> None:
     resume_iteration = 0
     resume_path: Path | None = None
     resume_mode: str | None = None
+    resume_source: str | None = None
     training_state_path = output_dir / f"{args.exp_id}_train_state_last.pth"
-    if args.resume_path is not None:
-        explicit: tuple[int, Path, str] | None = None
-        if is_main:
-            explicit = resolve_explicit_resume(args.resume_path, args.resume_iteration)
-        if distributed:
-            payload: list[tuple[int, str, str] | None] = [
-                None if explicit is None else (explicit[0], str(explicit[1]), explicit[2])
-            ]
-            dist.broadcast_object_list(payload, src=0)
-            explicit_payload = payload[0]
-            explicit = (
-                None
-                if explicit_payload is None
-                else (explicit_payload[0], Path(explicit_payload[1]), explicit_payload[2])
-            )
-        if explicit is None:
-            raise RuntimeError("Rank 0 did not resolve the explicit resume checkpoint.")
-        resume_iteration, resume_path, resume_mode = explicit
-        logger.info(
-            "Explicit resume selected: it=%d mode=%s path=%s new_exp_id=%s reset_optimizer=%s",
-            resume_iteration,
-            resume_mode,
-            resume_path,
-            args.exp_id,
-            args.reset_optimizer,
-        )
-        if args.resume_ema_path is not None and resume_mode != "weights":
-            raise ValueError("--resume-ema-path is only valid with a weights-only --resume-path")
-    elif args.auto_resume:
+    if args.auto_resume:
         latest: tuple[int, Path, str] | None = None
         if is_main:
             latest_weights = find_latest_weight_checkpoint(output_dir, args.exp_id)
@@ -901,21 +883,69 @@ def main() -> None:
             )
         if latest is not None:
             resume_iteration, resume_path, resume_mode = latest
+            resume_source = "exp_id"
             logger.info(
-                "Auto-resume found checkpoint: it=%d mode=%s path=%s",
+                "Same-exp-id auto-resume selected: exp_id=%s it=%d mode=%s path=%s",
+                args.exp_id,
                 resume_iteration,
                 resume_mode,
                 resume_path,
             )
+            if args.resume_path is not None:
+                logger.info(
+                    "Ignoring explicit resume fallback because EXP_ID=%s already has a checkpoint: %s",
+                    args.exp_id,
+                    args.resume_path,
+                )
+            if args.reset_optimizer:
+                logger.info(
+                    "Ignoring --reset-optimizer for same-exp-id auto-resume; restoring the experiment's "
+                    "own optimizer state when a full training state is available."
+                )
             if resume_mode == "weights":
                 logger.warning(
                     "Optimizer state is initialized fresh because this legacy checkpoint is weights-only. "
                     "Future checkpoints will include full resumable training state."
                 )
         else:
-            logger.info("Auto-resume found no numeric checkpoint in %s; starting from student init.", output_dir)
-    else:
-        logger.info("Auto-resume disabled; starting from student init.")
+            logger.info("Same-exp-id auto-resume found no checkpoint in %s.", output_dir)
+
+    if resume_path is None and args.resume_path is not None:
+        explicit: tuple[int, Path, str] | None = None
+        if is_main:
+            explicit = resolve_explicit_resume(args.resume_path, args.resume_iteration)
+        if distributed:
+            payload: list[tuple[int, str, str] | None] = [
+                None if explicit is None else (explicit[0], str(explicit[1]), explicit[2])
+            ]
+            dist.broadcast_object_list(payload, src=0)
+            explicit_payload = payload[0]
+            explicit = (
+                None
+                if explicit_payload is None
+                else (explicit_payload[0], Path(explicit_payload[1]), explicit_payload[2])
+            )
+        if explicit is None:
+            raise RuntimeError("Rank 0 did not resolve the explicit resume checkpoint.")
+        resume_iteration, resume_path, resume_mode = explicit
+        resume_source = "explicit"
+        logger.info(
+            "Explicit resume fallback selected: it=%d mode=%s path=%s new_exp_id=%s reset_optimizer=%s",
+            resume_iteration,
+            resume_mode,
+            resume_path,
+            args.exp_id,
+            args.reset_optimizer,
+        )
+        if args.resume_ema_path is not None and resume_mode != "weights":
+            raise ValueError("--resume-ema-path is only valid with a weights-only --resume-path")
+        if args.resume_ema_path is not None and not args.resume_ema_path.is_file():
+            raise FileNotFoundError(f"Explicit EMA resume checkpoint does not exist: {args.resume_ema_path}")
+    elif resume_path is None:
+        if args.auto_resume:
+            logger.info("No same-exp-id checkpoint or explicit resume fallback; starting from student init.")
+        else:
+            logger.info("Same-exp-id auto-resume disabled and no explicit resume path; starting from student init.")
 
     data_cfg = load_data_config(args.data_config, args.train_split)
     split_cfg = data_cfg[args.train_split]
@@ -997,7 +1027,7 @@ def main() -> None:
             logger.info("Restoring EMA state from full training checkpoint.")
             ema.load_state_dict(resume_state["ema"])
         elif resume_path is not None:
-            ema_resume_path = args.resume_ema_path
+            ema_resume_path = args.resume_ema_path if resume_source == "explicit" else None
             if ema_resume_path is None:
                 ema_resume_path = infer_ema_checkpoint_path(resume_path)
             if ema_resume_path is not None and ema_resume_path.exists():
@@ -1021,7 +1051,8 @@ def main() -> None:
         logger.info("EMA disabled on non-main rank; rank0 owns the only EMA copy.")
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    if resume_state is not None and not args.reset_optimizer:
+    reset_optimizer_for_resume = args.reset_optimizer and resume_source == "explicit"
+    if resume_state is not None and not reset_optimizer_for_resume:
         optimizer.load_state_dict(resume_state["optimizer"])
         move_optimizer_state(optimizer, device)
         logger.info("Restored optimizer state from iteration %d.", resume_iteration)

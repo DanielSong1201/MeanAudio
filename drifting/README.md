@@ -323,7 +323,7 @@ exps/drifting_flux/<exp_id>/.train.lock
 A second process using the same `EXP_ID` exits instead of writing into the same
 checkpoint and metrics files.
 
-Force a fresh run:
+Skip the same-`EXP_ID` lookup and start fresh (when `RESUME_PATH` is also unset):
 
 ```bash
 AUTO_RESUME=0 bash drifting/scripts/flux/train_flux_1x4090.sh
@@ -335,9 +335,12 @@ AUTO_RESUME=0 bash drifting/scripts/flux/train_flux_1x4090.sh
 ### Explicit checkpoint branching
 
 An explicit checkpoint can be resumed into a new `EXP_ID` while preserving the
-source iteration. `RESUME_PATH` takes precedence over the legacy same-`EXP_ID`
-auto-resume search. When `RESUME_PATH` is unset, all legacy behavior above is
-unchanged.
+source iteration. Recovery is keyed by `EXP_ID`: with the default
+`AUTO_RESUME=1`, training first looks for a full state or numeric checkpoint in
+`exps/drifting_flux/<EXP_ID>/`. `RESUME_PATH` is used only as a fallback when
+that target experiment has no checkpoint yet. This makes the same branch command
+safe to rerun: its first run starts from the source checkpoint, while later runs
+continue the target experiment instead of branching from the source again.
 
 Interfaces:
 
@@ -348,6 +351,13 @@ RESUME_EMA_PATH=/path/to/ema.pth
 RESET_OPTIMIZER=0            # 0=restore when available, 1=fresh AdamW
 ITERATIONS=100000            # absolute target, not additional iterations
 ```
+
+`RESET_OPTIMIZER` and `RESUME_EMA_PATH` apply to the explicit `RESUME_PATH`
+fallback. Once the target `EXP_ID` has its own full training state, auto-resume
+restores that experiment's optimizer and EMA regardless of the original branch
+settings. To bypass the target lookup deliberately, set `AUTO_RESUME=0`; then an
+explicit `RESUME_PATH` is selected directly, or the run starts from
+`STUDENT_INIT` when no explicit path is supplied.
 
 To preserve optimizer state from arbitrary historical iterations, enable
 numbered full-state archives during the source run. The interval must be a

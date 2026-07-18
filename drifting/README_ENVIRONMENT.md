@@ -305,8 +305,10 @@ ITERATIONS=50000 CUDA_VISIBLE_DEVICES=0,1 NPROC_PER_NODE=2 \
 `BATCH_SIZE * NPROC_PER_NODE`; `SAMPLES_PER_CONDITION` expands the number of
 latents processed by the model inside each condition batch.
 
-Flux training auto-resumes by default. Use a new `EXP_ID` and `AUTO_RESUME=0`
-for a deliberately fresh run.
+Flux training auto-resumes by default and treats `EXP_ID` as the experiment
+identity. It first restores the target `EXP_ID`; only when that experiment has
+no checkpoint does it use `RESUME_PATH` as a branch source. Use a new `EXP_ID`
+and `AUTO_RESUME=0` for a deliberately fresh run.
 
 To branch from a specific checkpoint into a new experiment while preserving
 its iteration, use `RESUME_PATH`, optional `RESUME_ITERATION` and
