@@ -10,6 +10,86 @@ The frozen teacher hidden states are produced by the same architecture family
 as the student, so this route follows the Teacher-Feature Drifting design
 directly.
 
+## Stage 1: Resonate-generated positive audio
+
+The official Resonate repository can be kept beside this repository:
+
+```text
+workspace/
+  MeanAudio/
+  Resonate/
+```
+
+From the MeanAudio root, generate three prompt-matched Resonate-GRPO positive
+audio files for every row in the Flux AudioCaps training manifest on one GPU:
+
+Create and activate the Resonate environment first. After installing the
+desired CUDA-compatible PyTorch build, install the sibling checkout itself:
+
+```bash
+conda create -n resonate-positive python=3.11 -y
+conda activate resonate-positive
+python -m pip install --upgrade pip wheel
+conda install -c conda-forge "ffmpeg<7" libsndfile -y
+python -m pip install --no-cache-dir \
+  torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+  --index-url https://download.pytorch.org/whl/cu124
+python -m pip install -e ../Resonate
+```
+
+Then run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+bash drifting/scripts/flux/build_resonate_positive_audio_1gpu.sh
+```
+
+The launcher defaults to `../Resonate`, 25-step Resonate Flow Matching,
+CFG 4.5, 10-second 44.1 kHz FLAC output, and three positives per caption. It
+uses the row order of `data/audiocaps/train-memmap.tsv`, so a later stage can
+encode each waveform with the MeanAudio 16 kHz VAE without losing the Flux
+training index.
+
+Run a small smoke generation into a separate directory before the full bank:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+LIMIT=4 \
+OUTPUT_DIR=data/audiocaps/resonate-positive-audio-smoke \
+bash drifting/scripts/flux/build_resonate_positive_audio_1gpu.sh
+```
+
+Common overrides:
+
+```text
+PYTHON
+RESONATE_ROOT
+MANIFEST
+OUTPUT_DIR
+CHECKPOINT
+POSITIVES_PER_CONDITION
+PROMPT_BATCH_SIZE
+NUM_STEPS
+CFG_STRENGTH
+DURATION
+BASE_SEED
+START_INDEX
+END_INDEX
+LIMIT
+AUTO_DOWNLOAD
+OVERWRITE
+FULL_PRECISION
+DRY_RUN
+```
+
+The generator is resumable. Valid audio plus per-prompt metadata is skipped,
+and `complete.json` is written only for a full-manifest run. Limited or ranged
+runs write range-specific `manifest_subset_*.jsonl` and
+`subset_complete_*.json` files, so they cannot overwrite a completed full-bank
+manifest. This stage intentionally stores waveforms only; it does not use the
+local Resonate TFD training route and does not write Resonate latents into the
+Flux positive bank.
+
 ## Objective
 
 For each batch, the student receives pure noise `x0` and predicts a one-step flow at `t=1`:
