@@ -102,20 +102,24 @@ CUDA_VISIBLE_DEVICES=0 \
 bash drifting/scripts/flux/build_resonate_teacher_positive_bank_1gpu.sh
 ```
 
-For four independent GPUs with one aggregated progress bar:
+For any selected set of independent GPUs with one aggregated progress bar:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
+CUDA_VISIBLE_DEVICES=1,3 \
 AUTO_DOWNLOAD=0 \
-bash drifting/scripts/flux/build_resonate_teacher_positive_bank_4gpu.sh
+bash drifting/scripts/flux/build_resonate_teacher_positive_bank_multigpu.sh
 ```
 
-The workers process `selected_rows[rank::4]` and write disjoint indexed NPZ
-files into the same bank. Progress and completion use small shared files; the
-builder intentionally does not initialize torch.distributed or NCCL, so uneven
-prompt runtimes cannot cause collective timeouts. Rank 0 alone displays the
-aggregate `generated/total` tqdm bar and writes `complete.json` after all
-workers finish and every NPZ passes validation.
+The launcher derives its process count from the comma-separated
+`CUDA_VISIBLE_DEVICES` list; an explicitly supplied `NPROC_PER_NODE` must match
+that count. The workers process `selected_rows[rank::world_size]` and write
+disjoint indexed NPZ files into the same bank. Progress and completion use
+small shared files; the builder intentionally does not initialize
+torch.distributed or NCCL, so uneven prompt runtimes cannot cause collective
+timeouts. Rank 0 alone displays the aggregate `generated/total` tqdm bar and
+writes `complete.json` after all workers finish and every NPZ passes
+validation. The historical `build_resonate_teacher_positive_bank_4gpu.sh`
+entry point remains available and now uses the same dynamic behavior.
 
 For each AudioCaps prompt it performs the following transaction:
 

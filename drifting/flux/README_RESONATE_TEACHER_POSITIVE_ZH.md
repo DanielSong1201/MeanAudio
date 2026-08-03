@@ -160,12 +160,23 @@ data/audiocaps/resonate-teacher-positive-smoke/subset_complete_*.json
 
 ## 6. 生成完整 teacher-positive bank
 
-### 四卡并行生成（推荐）
+### 多卡并行生成（推荐）
+
+启动器会根据 `CUDA_VISIBLE_DEVICES` 中的编号数量自动决定 worker 数量。
+例如使用四张卡：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 AUTO_DOWNLOAD=0 \
 bash drifting/scripts/flux/build_resonate_teacher_positive_bank_4gpu.sh
+```
+
+也可以通过通用名称启动：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+AUTO_DOWNLOAD=0 \
+bash drifting/scripts/flux/build_resonate_teacher_positive_bank_multigpu.sh
 ```
 
 四个 worker 处理互不重叠的 prompt：
@@ -187,7 +198,27 @@ teacher positives generated (4 GPUs): 1250/49838
 全局进度通过输出目录中的小型共享进度文件汇总，不调用
 `torch.distributed.init_process_group()`，也不执行 NCCL barrier、all-reduce
 或 gather。不同 prompt 推理耗时不一致时，不会因为某个 rank 未及时进入
-collective 而触发 NCCL timeout。`torchrun` 只负责启动和监管四个独立进程。
+collective 而触发 NCCL timeout。`torchrun` 只负责启动和监管这些独立进程。
+
+例如只使用物理 GPU 1 和 GPU 3：
+
+```bash
+CUDA_VISIBLE_DEVICES=1,3 \
+AUTO_DOWNLOAD=0 \
+bash drifting/scripts/flux/build_resonate_teacher_positive_bank_multigpu.sh
+```
+
+此时自动启动两个 worker。进程内的 `cuda:0` 对应物理 GPU 1，`cuda:1`
+对应物理 GPU 3；两个 worker 分别处理 `selected_rows[0::2]` 和
+`selected_rows[1::2]`。进度条会显示 `teacher positives generated (2 GPUs)`。
+
+通常不需要设置 `NPROC_PER_NODE`。如果显式设置，其值必须等于
+`CUDA_VISIBLE_DEVICES` 中的 GPU 数量，例如：
+
+```bash
+CUDA_VISIBLE_DEVICES=2,5 NPROC_PER_NODE=2 \
+bash drifting/scripts/flux/build_resonate_teacher_positive_bank_multigpu.sh
+```
 
 首次测试建议让每张卡至少处理一条 prompt：
 
@@ -211,7 +242,7 @@ bash drifting/scripts/flux/build_resonate_teacher_positive_bank_4gpu.sh
 <OUTPUT_DIR>/.bank-build-progress/<BANK_RUN_ID>/
 ```
 
-任务失败后直接重新运行即可；有效 NPZ 仍会被四个 worker 分片扫描并复用。
+任务失败后直接重新运行即可；有效 NPZ 仍会被各个 worker 分片扫描并复用。
 
 ### 单卡生成
 
@@ -333,10 +364,10 @@ AUTO_DOWNLOAD             1=缺失时下载 Resonate 权重，0=禁止下载
 OVERWRITE                 1=重新生成选定条目
 FULL_PRECISION            1=使用 float32 生成
 DRY_RUN                   1=只检查路径和任务范围
-PROGRESS_POLL_INTERVAL    四卡全局进度轮询间隔，默认1秒
-COORDINATION_TIMEOUT_MINUTES 四卡文件协调等待上限，默认720分钟
-NPROC_PER_NODE            四卡启动器固定要求为4
-CUDA_VISIBLE_DEVICES      四卡启动器要求恰好4个GPU编号
+PROGRESS_POLL_INTERVAL    多卡全局进度轮询间隔，默认1秒
+COORDINATION_TIMEOUT_MINUTES 多卡文件协调等待上限，默认720分钟
+NPROC_PER_NODE            可选；默认由CUDA_VISIBLE_DEVICES自动推导，显式设置时必须一致
+CUDA_VISIBLE_DEVICES      逗号分隔的物理GPU编号，例如1,3；数量决定worker数
 BANK_RUN_ID               本次协调命名空间，默认自动生成
 MASTER_ADDR               torchrun单机rendezvous地址，默认127.0.0.1
 MASTER_PORT               torchrun单机rendezvous端口，默认根据启动器PID生成
