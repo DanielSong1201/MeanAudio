@@ -90,6 +90,76 @@ manifest. This stage intentionally stores waveforms only; it does not use the
 local Resonate TFD training route and does not write Resonate latents into the
 Flux positive bank.
 
+### Resonate teacher-positive bank for Flux training
+
+For a complete Chinese server runbook, see
+[`README_RESONATE_TEACHER_POSITIVE_ZH.md`](README_RESONATE_TEACHER_POSITIVE_ZH.md).
+
+The integrated single-GPU builder avoids retaining the Stage-1 waveform bank:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+bash drifting/scripts/flux/build_resonate_teacher_positive_bank_1gpu.sh
+```
+
+For each AudioCaps prompt it performs the following transaction:
+
+1. Generate the configured number of 44.1 kHz Resonate-GRPO positives.
+2. Save only that prompt's audio as temporary FLAC files.
+3. Reload and resample the FLAC files to MeanAudio's 16 kHz input format.
+4. Encode them with `weights/v1-16.pth`, normalize with
+   `sets/latent_mean.pt` and `sets/latent_std.pt`, and atomically write
+   `<dataset_index>.npz`.
+5. Validate the NPZ and immediately delete the temporary FLAC files.
+
+The default output is:
+
+```text
+data/audiocaps/train-teacher-positives-resonate-grpo-25step-cfg4.5/
+```
+
+Each NPZ stores three FP16 tensors under `latents_normalized`, with the exact
+shape expected by `drifting/flux/train.py`. A `tqdm` bar reports generated
+prompts against the selected total. Existing valid NPZ files are counted as
+complete and skipped on restart; stale temporary FLAC files are removed. A
+full-manifest run writes `complete.json` only after validating every indexed
+NPZ. `LIMIT` and `START_INDEX`/`END_INDEX` runs write only a subset marker and
+cannot be used for training until a later full run finishes the bank.
+
+Run a one-prompt server smoke test in a separate directory first:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+LIMIT=1 \
+OUTPUT_DIR=data/audiocaps/resonate-teacher-positive-smoke \
+bash drifting/scripts/flux/build_resonate_teacher_positive_bank_1gpu.sh
+```
+
+Then use the completed bank directly with the existing training launcher. With
+three generated positives, training must use four samples per condition
+(`1 real + 3 generated`):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+EXP_ID=flux_resonate_positive \
+SAMPLES_PER_CONDITION=4 \
+TEACHER_POSITIVE_COUNT=3 \
+TEACHER_POSITIVE_DIR=data/audiocaps/train-teacher-positives-resonate-grpo-25step-cfg4.5 \
+bash drifting/scripts/flux/train_flux_1x4090.sh
+```
+
+The builder accepts `RESONATE_ROOT`, `MANIFEST`, `OUTPUT_DIR` (or
+`TEACHER_POSITIVE_DIR`), `CHECKPOINT`, `TARGET_VAE_WEIGHTS`,
+`TARGET_LATENT_MEAN`, `TARGET_LATENT_STD`, `POSITIVES_PER_CONDITION`,
+`NUM_STEPS`, `CFG_STRENGTH`, `DURATION`, `BASE_SEED`, `START_INDEX`,
+`END_INDEX`, `LIMIT`, `AUTO_DOWNLOAD`, `OVERWRITE`, `FULL_PRECISION`, and
+`DRY_RUN` overrides. The default server layout remains sibling checkouts:
+
+```text
+workspace/MeanAudio/
+workspace/Resonate/
+```
+
 ## Objective
 
 For each batch, the student receives pure noise `x0` and predicts a one-step flow at `t=1`:
