@@ -102,6 +102,21 @@ CUDA_VISIBLE_DEVICES=0 \
 bash drifting/scripts/flux/build_resonate_teacher_positive_bank_1gpu.sh
 ```
 
+For four independent GPUs with one aggregated progress bar:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+AUTO_DOWNLOAD=0 \
+bash drifting/scripts/flux/build_resonate_teacher_positive_bank_4gpu.sh
+```
+
+The workers process `selected_rows[rank::4]` and write disjoint indexed NPZ
+files into the same bank. Progress and completion use small shared files; the
+builder intentionally does not initialize torch.distributed or NCCL, so uneven
+prompt runtimes cannot cause collective timeouts. Rank 0 alone displays the
+aggregate `generated/total` tqdm bar and writes `complete.json` after all
+workers finish and every NPZ passes validation.
+
 For each AudioCaps prompt it performs the following transaction:
 
 1. Generate the configured number of 44.1 kHz Resonate-GRPO positives.

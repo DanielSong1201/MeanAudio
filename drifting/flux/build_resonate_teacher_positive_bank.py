@@ -4,6 +4,8 @@
 For every prompt this script generates temporary 44.1 kHz FLAC files, encodes
 them immediately with MeanAudio's 16 kHz VAE, atomically stores the normalized
 latent tensor expected by drifting/flux/train.py, and removes the FLAC files.
+Under torchrun, workers shard prompts by rank and rank 0 aggregates progress
+through shared files without initializing torch.distributed or NCCL.
 """
 
 from __future__ import annotations
@@ -12,6 +14,10 @@ import argparse
 import json
 import logging
 import os
+import re
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -34,6 +40,18 @@ from drifting.flux.build_resonate_positive_audio import (
 
 LOG = logging.getLogger("resonate-teacher-positive-bank")
 SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class WorkerContext:
+    rank: int
+    local_rank: int
+    world_size: int
+    run_id: str
+
+    @property
+    def is_main(self) -> bool:
+        return self.rank == 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +97,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--progress-poll-interval", type=float, default=1.0)
+    parser.add_argument("--coordination-timeout-minutes", type=float, default=720.0)
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
     return parser.parse_args()
 
@@ -91,6 +111,16 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -117,6 +147,100 @@ def load_torch(path: Path, torch: Any) -> Any:
 def require_file(path: Path, description: str) -> None:
     if not path.is_file() or path.stat().st_size == 0:
         raise FileNotFoundError(f"Missing {description}: {path}")
+
+
+def get_worker_context() -> WorkerContext:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if world_size < 1:
+        raise ValueError(f"Invalid WORLD_SIZE={world_size}")
+    if not 0 <= rank < world_size:
+        raise ValueError(f"Invalid RANK={rank} for WORLD_SIZE={world_size}")
+    run_id = (
+        os.environ.get("BANK_RUN_ID")
+        or os.environ.get("TORCHELASTIC_RUN_ID")
+        or f"single-{os.getpid()}"
+    )
+    run_id = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)
+    if not run_id:
+        raise ValueError("BANK_RUN_ID resolved to an empty value")
+    return WorkerContext(
+        rank=rank,
+        local_rank=local_rank,
+        world_size=world_size,
+        run_id=run_id,
+    )
+
+
+def wait_for_paths(
+    paths: Sequence[Path],
+    *,
+    timeout_seconds: float,
+    poll_interval: float,
+    description: str,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        missing = [path for path in paths if not path.exists()]
+        if not missing:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Timed out waiting for {description}; missing paths: "
+                + ", ".join(str(path) for path in missing)
+            )
+        time.sleep(poll_interval)
+
+
+def initialize_coordination_dir(
+    output_dir: Path,
+    worker: WorkerContext,
+    *,
+    timeout_seconds: float,
+    poll_interval: float,
+) -> Path:
+    coordination_dir = output_dir / ".bank-build-progress" / worker.run_id
+    ready_path = coordination_dir / "initialized.json"
+    if worker.is_main:
+        coordination_dir.mkdir(parents=True, exist_ok=True)
+        for rank in range(worker.world_size):
+            for suffix in ("status.json", "count", "done.json"):
+                (coordination_dir / f"rank-{rank}.{suffix}").unlink(missing_ok=True)
+        (coordination_dir / "assets-ready.json").unlink(missing_ok=True)
+        (coordination_dir / "config-ready.json").unlink(missing_ok=True)
+        (coordination_dir / "generation-ready.json").unlink(missing_ok=True)
+        ready_path.unlink(missing_ok=True)
+        atomic_write_json(
+            ready_path,
+            {
+                "run_id": worker.run_id,
+                "world_size": worker.world_size,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "coordination": "shared-files-no-torch-distributed",
+            },
+        )
+    else:
+        wait_for_paths(
+            [ready_path],
+            timeout_seconds=timeout_seconds,
+            poll_interval=poll_interval,
+            description="rank-0 coordination initialization",
+        )
+        payload = json.loads(ready_path.read_text(encoding="utf-8"))
+        if payload.get("world_size") != worker.world_size:
+            raise ValueError(
+                f"Coordination WORLD_SIZE mismatch: {payload.get('world_size')} "
+                f"!= {worker.world_size}"
+            )
+    return coordination_dir
+
+
+def read_worker_count(path: Path) -> int:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        return 0
 
 
 def expected_config(
@@ -356,9 +480,10 @@ def bank_item_is_valid(
 
 def main() -> None:
     args = parse_args()
+    worker = get_worker_context()
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s | %(levelname)s | %(message)s",
+        level=getattr(logging, args.log_level) if worker.is_main else logging.WARNING,
+        format=f"rank={worker.rank} | %(asctime)s | %(levelname)s | %(message)s",
     )
     if args.positives_per_condition < 1:
         raise ValueError("--positives-per-condition must be >= 1")
@@ -366,6 +491,11 @@ def main() -> None:
         raise ValueError("--num-steps must be >= 1")
     if args.duration <= 0:
         raise ValueError("--duration must be positive")
+    if args.progress_poll_interval <= 0:
+        raise ValueError("--progress-poll-interval must be positive")
+    if args.coordination_timeout_minutes <= 0:
+        raise ValueError("--coordination-timeout-minutes must be positive")
+    coordination_timeout_seconds = args.coordination_timeout_minutes * 60.0
 
     invocation_dir = Path.cwd()
     resonate_root = resolve_from(args.resonate_root, invocation_dir)
@@ -389,29 +519,42 @@ def main() -> None:
         and selected_rows[0].index == 0
         and selected_rows[-1].index == len(rows) - 1
     )
-    LOG.info("Manifest: %s (%d prompts)", manifest, len(rows))
-    LOG.info(
-        "Selected: %d prompts, indices %d..%d",
-        len(selected_rows),
-        selected_rows[0].index,
-        selected_rows[-1].index,
-    )
-    LOG.info("Training-ready output: %s", output_dir)
-    if args.dry_run:
-        print(
-            json.dumps(
-                {
-                    "resonate_root": str(resonate_root),
-                    "manifest": str(manifest),
-                    "output_dir": str(output_dir),
-                    "num_manifest_rows": len(rows),
-                    "num_selected_rows": len(selected_rows),
-                    "full_dataset": full_run,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+    worker_rows = selected_rows[worker.rank :: worker.world_size]
+    if worker.is_main:
+        LOG.info("Manifest: %s (%d prompts)", manifest, len(rows))
+        LOG.info(
+            "Selected: %d prompts, indices %d..%d",
+            len(selected_rows),
+            selected_rows[0].index,
+            selected_rows[-1].index,
         )
+        LOG.info(
+            "Workers: %d GPUs; prompt assignment uses selected_rows[rank::world_size]",
+            worker.world_size,
+        )
+        LOG.info("Training-ready output: %s", output_dir)
+    if args.dry_run:
+        if worker.is_main:
+            print(
+                json.dumps(
+                    {
+                        "resonate_root": str(resonate_root),
+                        "manifest": str(manifest),
+                        "output_dir": str(output_dir),
+                        "num_manifest_rows": len(rows),
+                        "num_selected_rows": len(selected_rows),
+                        "full_dataset": full_run,
+                        "world_size": worker.world_size,
+                        "items_per_rank": [
+                            len(selected_rows[rank :: worker.world_size])
+                            for rank in range(worker.world_size)
+                        ],
+                        "uses_nccl": False,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         return
 
     import torch
@@ -419,15 +562,47 @@ def main() -> None:
     from tqdm import tqdm
 
     if not args.device.startswith("cuda") or not torch.cuda.is_available():
-        raise RuntimeError("This builder requires one CUDA GPU")
-    device = torch.device(args.device)
+        raise RuntimeError("This builder requires CUDA GPUs")
+    if worker.world_size > torch.cuda.device_count():
+        raise RuntimeError(
+            f"WORLD_SIZE={worker.world_size}, but only {torch.cuda.device_count()} "
+            "CUDA devices are visible"
+        )
+    device = torch.device(
+        f"cuda:{worker.local_rank}" if worker.world_size > 1 else args.device
+    )
     torch.cuda.set_device(device)
-    check_assets(resonate_root, checkpoint, download_if_missing=args.download_if_missing)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    coordination_dir = initialize_coordination_dir(
+        output_dir,
+        worker,
+        timeout_seconds=coordination_timeout_seconds,
+        poll_interval=args.progress_poll_interval,
+    )
+
+    assets_ready_path = coordination_dir / "assets-ready.json"
+    if worker.is_main:
+        check_assets(
+            resonate_root,
+            checkpoint,
+            download_if_missing=args.download_if_missing,
+        )
+        atomic_write_json(
+            assets_ready_path,
+            {"ready_at": datetime.now(timezone.utc).isoformat()},
+        )
+    else:
+        wait_for_paths(
+            [assets_ready_path],
+            timeout_seconds=coordination_timeout_seconds,
+            poll_interval=args.progress_poll_interval,
+            description="rank-0 Resonate asset preparation",
+        )
     require_file(target_vae_weights, "MeanAudio 16 kHz VAE checkpoint")
     require_file(target_latent_mean, "MeanAudio latent mean")
     require_file(target_latent_std, "MeanAudio latent std")
 
-    LOG.info("Loading MeanAudio 16 kHz VAE encoder")
+    LOG.info("Rank %d loading MeanAudio 16 kHz VAE encoder on %s", worker.rank, device)
     target = load_target_encoder(
         vae_weights=target_vae_weights,
         latent_mean_path=target_latent_mean,
@@ -435,31 +610,45 @@ def main() -> None:
         device=device,
         torch=torch,
     )
-    config = expected_config(
-        args=args,
-        resonate_root=resonate_root,
-        manifest=manifest,
-        output_dir=output_dir,
-        checkpoint=checkpoint,
-        target_vae_weights=target_vae_weights,
-        target_latent_mean=target_latent_mean,
-        target_latent_std=target_latent_std,
-        num_items=len(rows),
-        target_num_audio_frames=target["num_audio_frames"],
-        latent_tokens=target["latent_tokens"],
-        latent_dim=target["latent_dim"],
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ensure_compatible_config(output_dir / "config.json", config)
+    config_ready_path = coordination_dir / "config-ready.json"
+    config_path = output_dir / "config.json"
+    config: dict[str, Any] | None = None
+    if worker.is_main:
+        config = expected_config(
+            args=args,
+            resonate_root=resonate_root,
+            manifest=manifest,
+            output_dir=output_dir,
+            checkpoint=checkpoint,
+            target_vae_weights=target_vae_weights,
+            target_latent_mean=target_latent_mean,
+            target_latent_std=target_latent_std,
+            num_items=len(rows),
+            target_num_audio_frames=target["num_audio_frames"],
+            latent_tokens=target["latent_tokens"],
+            latent_dim=target["latent_dim"],
+        )
+        ensure_compatible_config(config_path, config)
+        atomic_write_json(
+            config_ready_path,
+            {"ready_at": datetime.now(timezone.utc).isoformat()},
+        )
+    else:
+        wait_for_paths(
+            [config_ready_path, config_path],
+            timeout_seconds=coordination_timeout_seconds,
+            poll_interval=args.progress_poll_interval,
+            description="rank-0 bank configuration",
+        )
 
-    temporary_dir = output_dir / ".temporary-flac"
+    temporary_dir = output_dir / ".temporary-flac" / f"rank-{worker.rank}"
     if temporary_dir.exists():
         for stale_path in temporary_dir.glob("*.flac"):
             stale_path.unlink()
 
     valid_rows = [
         row
-        for row in selected_rows
+        for row in worker_rows
         if not args.overwrite
         and bank_item_is_valid(
             output_dir / f"{row.index}.npz",
@@ -470,32 +659,114 @@ def main() -> None:
         )
     ]
     valid_indices = {row.index for row in valid_rows}
-    pending_rows = [row for row in selected_rows if row.index not in valid_indices]
-    if pending_rows or args.overwrite:
-        (output_dir / "complete.json").unlink(missing_ok=True)
-    LOG.info("Resume scan: %d generated, %d pending", len(valid_rows), len(pending_rows))
+    pending_rows = [row for row in worker_rows if row.index not in valid_indices]
+    LOG.info(
+        "Rank %d assignment: %d generated, %d pending",
+        worker.rank,
+        len(valid_rows),
+        len(pending_rows),
+    )
+
+    status_path = coordination_dir / f"rank-{worker.rank}.status.json"
+    count_path = coordination_dir / f"rank-{worker.rank}.count"
+    done_path = coordination_dir / f"rank-{worker.rank}.done.json"
+    atomic_write_text(count_path, "0\n")
+    atomic_write_json(
+        status_path,
+        {
+            "rank": worker.rank,
+            "local_rank": worker.local_rank,
+            "assigned": len(worker_rows),
+            "initial_valid": len(valid_rows),
+            "pending": len(pending_rows),
+        },
+    )
+
+    progress = None
+    progress_stop = threading.Event()
+    progress_thread = None
+    generation_ready_path = coordination_dir / "generation-ready.json"
+    if worker.is_main:
+        status_paths = [
+            coordination_dir / f"rank-{rank}.status.json"
+            for rank in range(worker.world_size)
+        ]
+        wait_for_paths(
+            status_paths,
+            timeout_seconds=coordination_timeout_seconds,
+            poll_interval=args.progress_poll_interval,
+            description="worker resume scans",
+        )
+        statuses = [json.loads(path.read_text(encoding="utf-8")) for path in status_paths]
+        initial_valid = sum(int(status["initial_valid"]) for status in statuses)
+        assigned = sum(int(status["assigned"]) for status in statuses)
+        total_pending = sum(int(status["pending"]) for status in statuses)
+        if assigned != len(selected_rows):
+            raise RuntimeError(
+                f"Worker assignments cover {assigned} items, expected {len(selected_rows)}"
+            )
+        progress = tqdm(
+            total=len(selected_rows),
+            initial=initial_valid,
+            desc=f"teacher positives generated ({worker.world_size} GPUs)",
+            unit="prompt",
+            dynamic_ncols=True,
+        )
+        progress.set_postfix(generated=initial_valid, total=len(selected_rows))
+
+        def monitor_worker_progress() -> None:
+            displayed = initial_valid
+            count_paths = [
+                coordination_dir / f"rank-{rank}.count"
+                for rank in range(worker.world_size)
+            ]
+            while not progress_stop.wait(args.progress_poll_interval):
+                current = initial_valid + sum(read_worker_count(path) for path in count_paths)
+                current = min(current, len(selected_rows))
+                if current > displayed:
+                    assert progress is not None
+                    progress.update(current - displayed)
+                    progress.set_postfix(generated=current, total=len(selected_rows))
+                    displayed = current
+
+        progress_thread = threading.Thread(
+            target=monitor_worker_progress,
+            name="bank-progress-monitor",
+            daemon=True,
+        )
+        progress_thread.start()
+        if total_pending > 0 or args.overwrite:
+            (output_dir / "complete.json").unlink(missing_ok=True)
+        atomic_write_json(
+            generation_ready_path,
+            {
+                "initial_valid": initial_valid,
+                "pending": total_pending,
+                "ready_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    else:
+        wait_for_paths(
+            [generation_ready_path],
+            timeout_seconds=coordination_timeout_seconds,
+            poll_interval=args.progress_poll_interval,
+            description="rank-0 generation release",
+        )
 
     resonate_runtime = None
     if pending_rows:
-        LOG.info("Loading official Resonate-GRPO runtime")
+        LOG.info("Rank %d loading official Resonate-GRPO runtime", worker.rank)
         resonate_runtime = load_resonate_runtime(
             resonate_root=resonate_root,
             checkpoint=checkpoint,
             config_name=args.config_name,
-            device_name=args.device,
+            device_name=str(device),
             full_precision=args.full_precision,
             num_steps=args.num_steps,
             duration=args.duration,
         )
 
-    progress = tqdm(
-        total=len(selected_rows),
-        initial=len(valid_rows),
-        desc="teacher positives generated",
-        unit="prompt",
-        dynamic_ncols=True,
-    )
-    progress.set_postfix(generated=len(valid_rows), total=len(selected_rows))
+    generated_by_worker = 0
     for row in pending_rows:
         assert resonate_runtime is not None
         temporary_paths: list[Path] = []
@@ -555,13 +826,65 @@ def main() -> None:
         finally:
             for path in temporary_paths:
                 path.unlink(missing_ok=True)
-        progress.update(1)
-        progress.set_postfix(generated=progress.n, total=len(selected_rows))
-    progress.close()
+        generated_by_worker += 1
+        atomic_write_text(count_path, f"{generated_by_worker}\n")
     try:
         temporary_dir.rmdir()
     except OSError:
         pass
+
+    atomic_write_json(
+        done_path,
+        {
+            "rank": worker.rank,
+            "assigned": len(worker_rows),
+            "initial_valid": len(valid_rows),
+            "generated": generated_by_worker,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    if not worker.is_main:
+        return
+
+    done_paths = [
+        coordination_dir / f"rank-{rank}.done.json"
+        for rank in range(worker.world_size)
+    ]
+    wait_for_paths(
+        done_paths,
+        timeout_seconds=coordination_timeout_seconds,
+        poll_interval=args.progress_poll_interval,
+        description="all worker completion markers",
+    )
+    progress_stop.set()
+    if progress_thread is not None:
+        progress_thread.join(timeout=max(5.0, args.progress_poll_interval * 2))
+    assert progress is not None
+    done_payloads = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in done_paths
+    ]
+    for payload in done_payloads:
+        completed_by_worker = int(payload["initial_valid"]) + int(payload["generated"])
+        if completed_by_worker != int(payload["assigned"]):
+            raise RuntimeError(
+                f"Rank {payload['rank']} completed {completed_by_worker} items, "
+                f"but was assigned {payload['assigned']}"
+            )
+    final_generated = sum(int(payload["generated"]) for payload in done_payloads)
+    expected_progress = (
+        sum(int(status["initial_valid"]) for status in statuses)
+        + final_generated
+    )
+    if expected_progress != len(selected_rows):
+        raise RuntimeError(
+            f"Workers completed {expected_progress} prompts, expected {len(selected_rows)}"
+        )
+    if expected_progress > progress.n:
+        progress.update(expected_progress - progress.n)
+    progress.set_postfix(generated=progress.n, total=len(selected_rows))
+    progress.close()
 
     if full_run:
         missing = [
@@ -580,6 +903,7 @@ def main() -> None:
                 f"Teacher-positive bank incomplete: {len(missing)} invalid/missing items; "
                 f"first indices={missing[:20]}"
             )
+        assert config is not None
         completion = dict(config)
         completion["completed_at"] = datetime.now(timezone.utc).isoformat()
         atomic_write_json(output_dir / "complete.json", completion)
